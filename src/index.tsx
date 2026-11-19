@@ -662,17 +662,18 @@ function Content() {
 
       <PanelSection title="Raccourci manette">
         <PanelSectionRow>
-          <Field
-            label="Ouvrir les actions des timers"
-            description="Maintiens la combinaison en jeu pour mettre en pause, relancer ou arrêter un timer."
-            childrenContainerWidth="max"
-          >
+          <Field label="Combinaison" childrenContainerWidth="max">
             <Dropdown
               rgOptions={shortcutOptions}
               selectedOption={settings.shortcut ?? "l5_r5"}
               onChange={(o) => updateSettings({ shortcut: o.data })}
             />
           </Field>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={{ fontSize: 12, color: "#999", lineHeight: 1.4 }}>
+            Maintiens la combinaison en jeu pour mettre en pause, relancer ou arrêter un timer.
+          </div>
         </PanelSectionRow>
         {state.overlay_error && (
           <PanelSectionRow>
