@@ -1,8 +1,11 @@
 import asyncio
+import glob
 import json
 import os
+import pwd
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 
@@ -17,6 +20,45 @@ DEFAULT_SETTINGS = {
     "display": ":0",           # gamescope's Xwayland used by Steam
     "shortcut": "l5_r5",       # controller combo opening the timer actions (or "off")
 }
+
+# ---- Controller shortcut -------------------------------------------------- #
+# The Deck controller is read from its raw HID reports (hidraw), like
+# powange/decky-macro does: every hidraw reader gets its own copy of each
+# report, so Steam and the game are not affected. Needs the "root" flag.
+# Report layout (Linux hid-steam.c): 64 bytes, data[0]=1, data[1]=0,
+# data[2]=9 (ID_CONTROLLER_DECK_STATE); buttons as (byte, bit):
+DECK_BUTTONS = {
+    "A": (8, 7), "B": (8, 5), "X": (8, 6), "Y": (8, 4),
+    "SELECT": (9, 4), "STEAM": (9, 5), "START": (9, 6),
+    "L5": (9, 7), "R5": (10, 0), "L4": (13, 1), "R4": (13, 2),
+    "QAM": (14, 2),
+}
+SHORTCUTS = {
+    "l5_r5": ("L5", "R5"),
+    "l4_r4": ("L4", "R4"),
+    "select_start": ("SELECT", "START"),
+}
+SHORTCUT_HOLD = 0.4      # seconds the combo must be held
+SHORTCUT_COOLDOWN = 1.5  # seconds between two triggers
+VALVE_DECK_HID_ID = ":000028DE:00001205"
+
+
+def _find_deck_hidraw():
+    nodes = []
+    for uevent in glob.glob("/sys/class/hidraw/*/device/uevent"):
+        try:
+            with open(uevent) as f:
+                if VALVE_DECK_HID_ID in f.read().upper():
+                    nodes.append("/dev/" + uevent.split("/")[4])
+        except OSError:
+            pass
+    return sorted(nodes)
+
+
+def _pressed(report, name):
+    byte, bit = DECK_BUTTONS[name]
+    return bool(report[byte] & (1 << bit))
+
 
 # Environment variables set by Decky's bundled (PyInstaller) python that would
 # break the system python3 used for the overlay.
@@ -39,6 +81,10 @@ class Plugin:
         self.overlay_error = ""
         self.overlay_failures = []
         self.watch_task = None
+        self.loop = None
+        self.controller_status = "Initialisation…"
+        self.reader_stop = threading.Event()
+        self.reader_threads = {}
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -49,12 +95,15 @@ class Plugin:
         os.makedirs(decky.DECKY_PLUGIN_LOG_DIR, exist_ok=True)
         self._load()
         self._sync_overlay()
-        self.watch_task = asyncio.get_event_loop().create_task(self._watch())
+        self.loop = asyncio.get_event_loop()
+        self.watch_task = self.loop.create_task(self._watch())
+        threading.Thread(target=self._controller_supervisor, daemon=True).start()
         decky.logger.info("Decky Timer loaded")
 
     async def _unload(self):
         if self.watch_task:
             self.watch_task.cancel()
+        self.reader_stop.set()
         self._stop_overlay()
         decky.logger.info("Decky Timer unloaded")
 
@@ -91,6 +140,7 @@ class Plugin:
             "settings": self.settings,
             "overlay_running": self.proc is not None and self.proc.poll() is None,
             "overlay_error": self.overlay_error,
+            "controller_status": self.controller_status,
         }
 
     def _changed(self):
@@ -123,6 +173,17 @@ class Plugin:
             return
         env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
         env["DISPLAY"] = self.settings.get("display") or ":0"
+        # The backend runs as root (needed for hidraw); the overlay runs as the
+        # desktop user, who owns the gamescope X session.
+        user_kwargs = {}
+        if os.geteuid() == 0:
+            try:
+                pw = pwd.getpwnam(decky.DECKY_USER)
+                user_kwargs = {"user": pw.pw_uid, "group": pw.pw_gid}
+                env.update({"HOME": pw.pw_dir, "USER": pw.pw_name, "LOGNAME": pw.pw_name,
+                            "XDG_RUNTIME_DIR": f"/run/user/{pw.pw_uid}"})
+            except Exception as e:
+                decky.logger.warning(f"Cannot drop privileges for overlay: {e}")
         try:
             log = open(self.overlay_log, "a")
             log.write(f"--- start {time.strftime('%Y-%m-%d %H:%M:%S')} DISPLAY={env['DISPLAY']}\n")
@@ -130,7 +191,7 @@ class Plugin:
             self.proc = subprocess.Popen(
                 [python, "-u", self.overlay_script],
                 stdin=subprocess.PIPE, stdout=log, stderr=log, env=env,
-                cwd=os.path.dirname(self.overlay_script),
+                cwd=os.path.dirname(self.overlay_script), **user_kwargs,
             )
             self.proc_started = _now()
             log.close()
@@ -208,6 +269,75 @@ class Plugin:
                 raise
             except Exception as e:
                 decky.logger.error(f"watch loop: {e}")
+
+    # ------------------------------------------------------------------ #
+    # Controller shortcut (hidraw)
+    # ------------------------------------------------------------------ #
+
+    def _controller_supervisor(self):
+        """Keeps one reader thread per Deck hidraw node (survives suspend)."""
+        while not self.reader_stop.is_set():
+            nodes = _find_deck_hidraw()
+            for node in nodes:
+                t = self.reader_threads.get(node)
+                if t is None or not t.is_alive():
+                    t = threading.Thread(target=self._read_controller, args=(node,), daemon=True)
+                    self.reader_threads[node] = t
+                    t.start()
+            alive = [n for n, t in self.reader_threads.items() if t.is_alive()]
+            if not nodes:
+                self.controller_status = "Manette du Deck introuvable"
+            elif not alive:
+                if os.geteuid() != 0:
+                    self.controller_status = "Lecture de la manette impossible (le plugin doit tourner en root)"
+                else:
+                    self.controller_status = "Lecture de la manette impossible (voir les logs)"
+            else:
+                self.controller_status = "Manette détectée"
+            self.reader_stop.wait(5)
+
+    def _read_controller(self, node):
+        try:
+            fd = os.open(node, os.O_RDONLY)
+        except OSError as e:
+            decky.logger.warning(f"Cannot open {node}: {e}")
+            return
+        decky.logger.info(f"Reading controller from {node}")
+        held_since = None
+        fired = False
+        try:
+            while not self.reader_stop.is_set():
+                report = os.read(fd, 64)
+                if len(report) != 64 or report[0] != 1 or report[1] != 0 or report[2] != 9:
+                    continue
+                combo = SHORTCUTS.get(self.settings.get("shortcut", ""))
+                if not combo:
+                    held_since = None
+                    continue
+                if all(_pressed(report, b) for b in combo):
+                    now = time.monotonic()
+                    if held_since is None:
+                        held_since = now
+                        fired = False
+                    elif not fired and now - held_since >= SHORTCUT_HOLD:
+                        fired = True
+                        self._shortcut_triggered()
+                else:
+                    held_since = None
+        except OSError as e:
+            decky.logger.info(f"Controller reader {node} stopped: {e}")
+        finally:
+            os.close(fd)
+
+    _last_shortcut = 0.0
+
+    def _shortcut_triggered(self):
+        now = time.monotonic()
+        if now - self._last_shortcut < SHORTCUT_COOLDOWN:
+            return
+        self._last_shortcut = now
+        if self.loop is not None:
+            asyncio.run_coroutine_threadsafe(decky.emit("open_quick_controls"), self.loop)
 
     # ------------------------------------------------------------------ #
     # Frontend API

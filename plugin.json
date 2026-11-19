@@ -1,7 +1,7 @@
 {
   "name": "Decky Timer",
   "author": "powange",
-  "flags": [],
+  "flags": ["root"],
   "api_version": 1,
   "publish": {
     "tags": ["timer", "overlay", "utility"],

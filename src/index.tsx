@@ -6,7 +6,6 @@ import {
   Focusable,
   ModalRoot,
   Navigation,
-  Router,
   PanelSection,
   PanelSectionRow,
   SliderField,
@@ -63,6 +62,7 @@ interface State {
   settings: Settings;
   overlay_running: boolean;
   overlay_error: string;
+  controller_status: string;
 }
 
 const getState = callable<[], State>("get_state");
@@ -228,20 +228,17 @@ function TimerPickerModal({
 // Controller shortcut
 // --------------------------------------------------------------------------
 
-// Bits of ulButtons in SteamClient.Input controller state.
-const BTN = { Y: 4, SELECT: 12, STEAM: 13, START: 14, L5: 15, R5: 16 };
-const bit = (n: number) => 2 ** n;
-
-const SHORTCUTS: Record<string, { label: string; mask: number; steam: boolean }> = {
-  l5_r5: { label: "L5 + R5 (gâchettes arrière basses)", mask: bit(BTN.L5) + bit(BTN.R5), steam: false },
-  steam_y: { label: "Steam + Y", mask: bit(BTN.STEAM) + bit(BTN.Y), steam: true },
-  select_start: { label: "Select + Start", mask: bit(BTN.SELECT) + bit(BTN.START), steam: false },
+// The combo is detected by the backend, which reads the Deck controller
+// directly (hidraw), like decky-macro. Keys must match SHORTCUTS in main.py.
+const SHORTCUTS: Record<string, string> = {
+  l5_r5: "L5 + R5",
+  l4_r4: "L4 + R4",
+  select_start: "Select + Start",
 };
-const HOLD_MS = 400;
 
 const shortcutOptions = [
   { data: "off", label: "Désactivé" },
-  ...Object.entries(SHORTCUTS).map(([data, s]) => ({ data, label: s.label })),
+  ...Object.entries(SHORTCUTS).map(([data, label]) => ({ data, label })),
 ];
 
 async function openQuickControls() {
@@ -265,47 +262,6 @@ async function openQuickControls() {
       showModal(<TimerPickerModal onState={onState} />);
     }
   }, 300);
-}
-
-function registerShortcut() {
-  let holdTimer: ReturnType<typeof setTimeout> | null = null;
-  let down = false;
-  let lastFired = 0;
-
-  const handler = (changes: any[]) => {
-    const shortcut = SHORTCUTS[latestState?.settings.shortcut ?? ""];
-    if (!shortcut) return;
-    for (const input of changes) {
-      const buttons = Number(input?.ulButtons ?? 0);
-      const pressed = (buttons & shortcut.mask) === shortcut.mask;
-      if (pressed && !down) {
-        down = true;
-        if (shortcut.steam) {
-          // Keep Steam from opening its own menu on the button release.
-          (Router as any).DisableHomeAndQuickAccessButtons?.();
-          setTimeout(() => (Router as any).EnableHomeAndQuickAccessButtons?.(), 1000);
-        }
-        holdTimer = setTimeout(() => {
-          holdTimer = null;
-          if (down && Date.now() - lastFired > 1500) {
-            lastFired = Date.now();
-            openQuickControls();
-          }
-        }, HOLD_MS);
-      } else if (!pressed && down) {
-        down = false;
-        if (holdTimer) clearTimeout(holdTimer);
-        holdTimer = null;
-      }
-    }
-  };
-
-  try {
-    return (window as any).SteamClient.Input.RegisterForControllerStateChanges(handler);
-  } catch (e) {
-    console.error("Decky Timer: controller shortcut unavailable", e);
-    return null;
-  }
 }
 
 function TimerEditorModal({
@@ -673,6 +629,9 @@ function Content() {
         <PanelSectionRow>
           <div style={{ fontSize: 12, color: "#999", lineHeight: 1.4 }}>
             Maintiens la combinaison en jeu pour mettre en pause, relancer ou arrêter un timer.
+            <div style={{ color: state.controller_status === "Manette détectée" ? "#7c7" : "#ff8080" }}>
+              {state.controller_status}
+            </div>
           </div>
         </PanelSectionRow>
         {state.overlay_error && (
@@ -698,14 +657,16 @@ export default definePlugin(() => {
       playSound: true,
       showToast: true,
       body: SHORTCUTS[latestState?.settings.shortcut ?? ""]
-        ? `Le temps continue en négatif – ${SHORTCUTS[latestState!.settings.shortcut].label.split(" (")[0]} pour l'arrêter.`
+        ? `Le temps continue en négatif – maintiens ${SHORTCUTS[latestState!.settings.shortcut]} pour l'arrêter.`
         : "Le temps continue en négatif – ouvre le menu pour l'arrêter.",
     });
   });
 
   // Load settings now so the shortcut works before the menu is ever opened.
   getState().then(syncClock).catch(() => {});
-  const shortcutRegistration = registerShortcut();
+  const shortcutListener = addEventListener("open_quick_controls", () => {
+    openQuickControls();
+  });
 
   return {
     name: "Decky Timer",
@@ -714,7 +675,7 @@ export default definePlugin(() => {
     icon: <FaStopwatch />,
     onDismount() {
       removeEventListener("timer_finished", listener);
-      shortcutRegistration?.unregister?.();
+      removeEventListener("open_quick_controls", shortcutListener);
     },
   };
 });
