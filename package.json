@@ -1,6 +1,6 @@
 {
   "name": "decky-timer",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Decky Loader plugin: named timers shown as an in-game overlay on the Steam Deck",
   "type": "module",
   "scripts": {

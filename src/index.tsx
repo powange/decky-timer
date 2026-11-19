@@ -53,6 +53,10 @@ interface Settings {
   notify: boolean;
   display: string;
   shortcut: string;
+  alarm_enabled: boolean;
+  alarm_repeat: boolean;
+  alarm_interval: number;
+  alarm_volume: number;
 }
 
 interface State {
@@ -63,6 +67,7 @@ interface State {
   overlay_running: boolean;
   overlay_error: string;
   controller_status: string;
+  alarm_error: string;
 }
 
 const getState = callable<[], State>("get_state");
@@ -77,6 +82,7 @@ const savePreset = callable<[id: string, name: string, duration: number], State>
 const deletePreset = callable<[id: string], State>("delete_preset");
 const movePreset = callable<[id: string, delta: number], State>("move_preset");
 const saveSettings = callable<[settings: Partial<Settings>], State>("save_settings");
+const testAlarm = callable<[], State>("test_alarm");
 
 // The backend clock is the reference (the overlay uses it too).
 let clockOffset = 0;
@@ -458,6 +464,8 @@ const positionOptions = [
   { data: "bottom-right", label: "En bas à droite" },
 ];
 
+const intervalOptions = [10, 20, 30, 60].map((s) => ({ data: s, label: `Toutes les ${s} s` }));
+
 const sizeOptions = [
   { data: "small", label: "Petite" },
   { data: "medium", label: "Moyenne" },
@@ -616,6 +624,59 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
+      <PanelSection title="Alarme">
+        <PanelSectionRow>
+          <ToggleField
+            label="Son d'alarme à la fin"
+            checked={settings.alarm_enabled ?? true}
+            onChange={(v) => updateSettings({ alarm_enabled: v })}
+          />
+        </PanelSectionRow>
+        {(settings.alarm_enabled ?? true) && (
+          <>
+            <PanelSectionRow>
+              <SliderField
+                label="Volume"
+                value={Math.round((settings.alarm_volume ?? 0.8) * 100)}
+                min={10}
+                max={100}
+                step={10}
+                showValue
+                onChange={(v) => updateSettings({ alarm_volume: v / 100 })}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ToggleField
+                label="Répéter tant que le temps est dépassé"
+                checked={settings.alarm_repeat ?? true}
+                onChange={(v) => updateSettings({ alarm_repeat: v })}
+              />
+            </PanelSectionRow>
+            {(settings.alarm_repeat ?? true) && (
+              <PanelSectionRow>
+                <Field label="Rythme" childrenContainerWidth="max">
+                  <Dropdown
+                    rgOptions={intervalOptions}
+                    selectedOption={settings.alarm_interval ?? 30}
+                    onChange={(o) => updateSettings({ alarm_interval: o.data })}
+                  />
+                </Field>
+              </PanelSectionRow>
+            )}
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={async () => apply(await testAlarm())}>
+                Tester l'alarme
+              </ButtonItem>
+            </PanelSectionRow>
+          </>
+        )}
+        {state.alarm_error && (
+          <PanelSectionRow>
+            <div style={{ fontSize: 11, color: "#ff8080" }}>{state.alarm_error}</div>
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+
       <PanelSection title="Raccourci manette">
         <PanelSectionRow>
           <Field label="Combinaison" childrenContainerWidth="max">
@@ -654,7 +715,7 @@ export default definePlugin(() => {
   const listener = addEventListener<[{ id: string; name: string }]>("timer_finished", (t) => {
     toaster.toast({
       title: `⏰ ${t?.name ?? "Timer"} terminé`,
-      playSound: true,
+      playSound: !(latestState?.settings.alarm_enabled ?? true),
       showToast: true,
       body: SHORTCUTS[latestState?.settings.shortcut ?? ""]
         ? `Le temps continue en négatif – maintiens ${SHORTCUTS[latestState!.settings.shortcut]} pour l'arrêter.`

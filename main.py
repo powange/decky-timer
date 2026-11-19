@@ -7,7 +7,10 @@ import shutil
 import subprocess
 import threading
 import time
+import math
+import struct
 import uuid
+import wave
 
 import decky
 
@@ -18,7 +21,11 @@ DEFAULT_SETTINGS = {
     "opacity": 0.75,
     "notify": True,            # toast when a timer reaches zero
     "display": ":0",           # gamescope's Xwayland used by Steam
-    "shortcut": "l5_r5",       # controller combo opening the timer actions (or "off")
+    "shortcut": "l5_r5",
+    "alarm_enabled": True,     # alarm sound when a timer reaches zero
+    "alarm_repeat": True,      # repeat it while the timer is in overtime
+    "alarm_interval": 30,      # seconds between repeats
+    "alarm_volume": 0.8,       # 0.0 - 1.0       # controller combo opening the timer actions (or "off")
 }
 
 # ---- Controller shortcut -------------------------------------------------- #
@@ -60,6 +67,41 @@ def _pressed(report, name):
     return bool(report[byte] & (1 << bit))
 
 
+# ---- Alarm sound ----------------------------------------------------------- #
+# Generated at runtime (no binary asset) and played with PipeWire's pw-play,
+# falling back to paplay / aplay, as the desktop user.
+ALARM_PLAYERS = ("/usr/bin/pw-play", "/usr/bin/paplay", "/usr/bin/aplay")
+
+
+def _write_alarm_wav(path):
+    """Two groups of three bright beeps (~1.6 s), soft edges to avoid clicks."""
+    rate = 44100
+    frames = bytearray()
+
+    def tone(freq, dur):
+        n = int(rate * dur)
+        fade = int(rate * 0.006)
+        for i in range(n):
+            env = min(1.0, i / fade, (n - 1 - i) / fade)
+            # Fundamental + a bit of 2nd harmonic: more piercing over game audio.
+            v = 0.75 * math.sin(2 * math.pi * freq * i / rate) + 0.25 * math.sin(4 * math.pi * freq * i / rate)
+            frames.extend(struct.pack("<h", int(v * env * 0.9 * 32767)))
+
+    def silence(dur):
+        frames.extend(b"\x00\x00" * int(rate * dur))
+
+    for _ in range(2):
+        for _ in range(3):
+            tone(1760, 0.11)
+            silence(0.07)
+        silence(0.35)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(frames))
+
+
 # Environment variables set by Decky's bundled (PyInstaller) python that would
 # break the system python3 used for the overlay.
 _STRIP_ENV = ("LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHOME", "PYTHONPATH")
@@ -85,6 +127,10 @@ class Plugin:
         self.controller_status = "Initialisation…"
         self.reader_stop = threading.Event()
         self.reader_threads = {}
+        self.alarm_wav = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "alarm.wav")
+        self.alarm_proc = None
+        self.alarm_last = {}       # timer id -> time of the last alarm
+        self.alarm_error = ""
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -141,6 +187,7 @@ class Plugin:
             "overlay_running": self.proc is not None and self.proc.poll() is None,
             "overlay_error": self.overlay_error,
             "controller_status": self.controller_status,
+            "alarm_error": self.alarm_error,
         }
 
     def _changed(self):
@@ -175,15 +222,7 @@ class Plugin:
         env["DISPLAY"] = self.settings.get("display") or ":0"
         # The backend runs as root (needed for hidraw); the overlay runs as the
         # desktop user, who owns the gamescope X session.
-        user_kwargs = {}
-        if os.geteuid() == 0:
-            try:
-                pw = pwd.getpwnam(decky.DECKY_USER)
-                user_kwargs = {"user": pw.pw_uid, "group": pw.pw_gid}
-                env.update({"HOME": pw.pw_dir, "USER": pw.pw_name, "LOGNAME": pw.pw_name,
-                            "XDG_RUNTIME_DIR": f"/run/user/{pw.pw_uid}"})
-            except Exception as e:
-                decky.logger.warning(f"Cannot drop privileges for overlay: {e}")
+        user_kwargs = self._as_desktop_user(env)
         try:
             log = open(self.overlay_log, "a")
             log.write(f"--- start {time.strftime('%Y-%m-%d %H:%M:%S')} DISPLAY={env['DISPLAY']}\n")
@@ -199,6 +238,84 @@ class Plugin:
             self.proc = None
             self.overlay_error = f"Lancement impossible : {e}"
             decky.logger.error(self.overlay_error)
+
+    def _as_desktop_user(self, env):
+        """Popen kwargs (and env changes) to run a child as the desktop user."""
+        if os.geteuid() != 0:
+            return {}
+        try:
+            pw = pwd.getpwnam(decky.DECKY_USER)
+        except Exception as e:
+            decky.logger.warning(f"Cannot drop privileges: {e}")
+            return {}
+        env.update({"HOME": pw.pw_dir, "USER": pw.pw_name, "LOGNAME": pw.pw_name,
+                    "XDG_RUNTIME_DIR": f"/run/user/{pw.pw_uid}"})
+        return {"user": pw.pw_uid, "group": pw.pw_gid}
+
+    # ------------------------------------------------------------------ #
+    # Alarm
+    # ------------------------------------------------------------------ #
+
+    def _play_alarm(self):
+        if self.alarm_proc is not None and self.alarm_proc.poll() is None:
+            return  # still playing
+        try:
+            if not os.path.exists(self.alarm_wav):
+                _write_alarm_wav(self.alarm_wav)
+                os.chmod(self.alarm_wav, 0o644)
+        except Exception as e:
+            self.alarm_error = f"Impossible de créer le son : {e}"
+            return
+        player = next((p for p in ALARM_PLAYERS if os.path.exists(p)), None)
+        if player is None:
+            self.alarm_error = "Aucun lecteur audio trouvé (pw-play, paplay, aplay)"
+            return
+        volume = max(0.0, min(1.0, float(self.settings.get("alarm_volume", 0.8))))
+        name = os.path.basename(player)
+        if name == "pw-play":
+            cmd = [player, "--volume", f"{volume:.2f}", self.alarm_wav]
+        elif name == "paplay":
+            cmd = [player, f"--volume={int(volume * 65536)}", self.alarm_wav]
+        else:
+            cmd = [player, "-q", self.alarm_wav]
+        env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+        try:
+            self.alarm_proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
+                                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                               **self._as_desktop_user(env))
+            self.alarm_error = ""
+        except Exception as e:
+            self.alarm_error = f"Lecture du son impossible : {e}"
+            decky.logger.error(self.alarm_error)
+
+    def _check_alarm_result(self):
+        p = self.alarm_proc
+        if p is not None and p.poll() is not None:
+            if p.returncode != 0:
+                err = (p.stderr.read() or b"").decode(errors="replace").strip().splitlines()
+                self.alarm_error = f"Le lecteur audio a échoué : {err[-1] if err else p.returncode}"
+                decky.logger.error(self.alarm_error)
+            self.alarm_proc = None
+
+    def _alarm_tick(self, now):
+        self._check_alarm_result()
+        if not self.settings.get("alarm_enabled", True):
+            return
+        interval = max(5, int(self.settings.get("alarm_interval", 30)))
+        due = False
+        active = set()
+        for t in self.timers:
+            if t.get("paused") or not t.get("end_at") or t["end_at"] > now:
+                continue
+            active.add(t["id"])
+            last = self.alarm_last.get(t["id"])
+            if last is None or (self.settings.get("alarm_repeat", True) and now - last >= interval):
+                self.alarm_last[t["id"]] = now
+                due = True
+        # Forget stopped / paused / restarted timers.
+        self.alarm_last = {k: v for k, v in self.alarm_last.items() if k in active}
+        if due:
+            self._play_alarm()
 
     def _stop_overlay(self):
         if self.proc is None:
@@ -262,6 +379,7 @@ class Plugin:
                     if self.settings.get("notify", True):
                         for t in fired:
                             await decky.emit("timer_finished", {"id": t["id"], "name": t["name"]})
+                self._alarm_tick(now)
                 # Restart a crashed overlay.
                 if self._overlay_wanted() and (self.proc is None or self.proc.poll() is not None):
                     self._sync_overlay()
@@ -431,6 +549,13 @@ class Plugin:
         return self._changed()
 
     # Settings --------------------------------------------------------- #
+
+    async def test_alarm(self):
+        self.alarm_proc = None if (self.alarm_proc and self.alarm_proc.poll() is not None) else self.alarm_proc
+        self._play_alarm()
+        await asyncio.sleep(0.3)
+        self._check_alarm_result()
+        return self._state()
 
     async def save_settings(self, settings: dict):
         old_display = self.settings.get("display")
