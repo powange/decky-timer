@@ -11,6 +11,7 @@ Des timers nommés pour le Steam Deck, affichés **en overlay par-dessus le jeu*
 - **Plusieurs timers en même temps**, empilés dans l'overlay.
 - **Temps dépassé** : à zéro, le timer continue en négatif (en rouge) et une notification s'affiche.
 - **Contrôle** : touche un timer en cours dans le menu pour le mettre en pause, le reprendre, le relancer ou l'arrêter.
+- **Raccourci manette** : maintiens une combinaison en jeu (L5 + R5 par défaut, ou Steam + Y, Select + Start) pour ouvrir directement le menu pause / relancer / arrêter. S'il y a plusieurs timers, une liste triée par urgence s'affiche. Toucher l'overlay lui-même n'est pas possible : gamescope envoie le tactile au jeu.
 - **Overlay réglable** : position (coins / haut centre), taille, opacité du fond, on/off.
 - **Mise à jour intégrée** : le plugin vérifie la dernière release GitHub et l'installe via l'installeur de Decky. Plus besoin de retaper l'URL.
 

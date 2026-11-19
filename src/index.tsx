@@ -5,6 +5,8 @@ import {
   Field,
   Focusable,
   ModalRoot,
+  Navigation,
+  Router,
   PanelSection,
   PanelSectionRow,
   SliderField,
@@ -51,6 +53,7 @@ interface Settings {
   opacity: number;
   notify: boolean;
   display: string;
+  shortcut: string;
 }
 
 interface State {
@@ -77,8 +80,11 @@ const saveSettings = callable<[settings: Partial<Settings>], State>("save_settin
 
 // The backend clock is the reference (the overlay uses it too).
 let clockOffset = 0;
+// Last state seen from the backend, used by the controller shortcut.
+let latestState: State | null = null;
 const syncClock = (s: State) => {
   clockOffset = s.now - Date.now() / 1000;
+  latestState = s;
   return s;
 };
 const backendNow = () => Date.now() / 1000 + clockOffset;
@@ -170,6 +176,136 @@ function ActiveTimerModal({
       </Focusable>
     </ModalRoot>
   );
+}
+
+// Most urgent first: overtime (most overdue first), then running by time
+// left, paused last.
+const byUrgency = (a: Timer, b: Timer) => {
+  const rank = (t: Timer) => (t.paused ? 2 : remainingOf(t) <= 0 ? 0 : 1);
+  return rank(a) - rank(b) || remainingOf(a) - remainingOf(b);
+};
+
+function TimerPickerModal({
+  closeModal,
+  onState,
+}: {
+  closeModal?: () => void;
+  onState: (s: State) => void;
+}) {
+  useTick();
+  const timers = [...(latestState?.timers ?? [])].sort(byUrgency);
+
+  return (
+    <ModalRoot onCancel={closeModal}>
+      <div style={{ fontSize: 18, fontWeight: "bold", marginBottom: 8 }}>Timers en cours</div>
+      <Focusable style={modalButtons}>
+        {timers.map((t) => (
+          <DialogButton
+            key={t.id}
+            onClick={() => {
+              closeModal?.();
+              showModal(<ActiveTimerModal timer={t} onState={onState} />);
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span>
+                {t.paused ? "⏸ " : ""}
+                {t.name}
+              </span>
+              <span style={{ fontFamily: "monospace", fontWeight: "bold", color: timerColor(t) }}>
+                {formatSeconds(remainingOf(t))}
+              </span>
+            </div>
+          </DialogButton>
+        ))}
+        <DialogButton onClick={closeModal}>Fermer</DialogButton>
+      </Focusable>
+    </ModalRoot>
+  );
+}
+
+// --------------------------------------------------------------------------
+// Controller shortcut
+// --------------------------------------------------------------------------
+
+// Bits of ulButtons in SteamClient.Input controller state.
+const BTN = { Y: 4, SELECT: 12, STEAM: 13, START: 14, L5: 15, R5: 16 };
+const bit = (n: number) => 2 ** n;
+
+const SHORTCUTS: Record<string, { label: string; mask: number; steam: boolean }> = {
+  l5_r5: { label: "L5 + R5 (gâchettes arrière basses)", mask: bit(BTN.L5) + bit(BTN.R5), steam: false },
+  steam_y: { label: "Steam + Y", mask: bit(BTN.STEAM) + bit(BTN.Y), steam: true },
+  select_start: { label: "Select + Start", mask: bit(BTN.SELECT) + bit(BTN.START), steam: false },
+};
+const HOLD_MS = 400;
+
+const shortcutOptions = [
+  { data: "off", label: "Désactivé" },
+  ...Object.entries(SHORTCUTS).map(([data, s]) => ({ data, label: s.label })),
+];
+
+async function openQuickControls() {
+  let state: State;
+  try {
+    state = syncClock(await getState());
+  } catch {
+    return;
+  }
+  if (state.timers.length === 0) {
+    toaster.toast({ title: "Decky Timer", body: "Aucun timer en cours." });
+    return;
+  }
+  // Bring up the Steam overlay so the dialog is visible on top of the game.
+  Navigation.OpenQuickAccessMenu(999 as any); // QuickAccessTab.Decky
+  const onState = (s: State) => syncClock(s);
+  setTimeout(() => {
+    if (state.timers.length === 1) {
+      showModal(<ActiveTimerModal timer={state.timers[0]} onState={onState} />);
+    } else {
+      showModal(<TimerPickerModal onState={onState} />);
+    }
+  }, 300);
+}
+
+function registerShortcut() {
+  let holdTimer: ReturnType<typeof setTimeout> | null = null;
+  let down = false;
+  let lastFired = 0;
+
+  const handler = (changes: any[]) => {
+    const shortcut = SHORTCUTS[latestState?.settings.shortcut ?? ""];
+    if (!shortcut) return;
+    for (const input of changes) {
+      const buttons = Number(input?.ulButtons ?? 0);
+      const pressed = (buttons & shortcut.mask) === shortcut.mask;
+      if (pressed && !down) {
+        down = true;
+        if (shortcut.steam) {
+          // Keep Steam from opening its own menu on the button release.
+          (Router as any).DisableHomeAndQuickAccessButtons?.();
+          setTimeout(() => (Router as any).EnableHomeAndQuickAccessButtons?.(), 1000);
+        }
+        holdTimer = setTimeout(() => {
+          holdTimer = null;
+          if (down && Date.now() - lastFired > 1500) {
+            lastFired = Date.now();
+            openQuickControls();
+          }
+        }, HOLD_MS);
+      } else if (!pressed && down) {
+        down = false;
+        if (holdTimer) clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+    }
+  };
+
+  try {
+    return (window as any).SteamClient.Input.RegisterForControllerStateChanges(handler);
+  } catch (e) {
+    console.error("Decky Timer: controller shortcut unavailable", e);
+    return null;
+  }
 }
 
 function TimerEditorModal({
@@ -522,6 +658,22 @@ function Content() {
             onChange={(v) => updateSettings({ notify: v })}
           />
         </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Raccourci manette">
+        <PanelSectionRow>
+          <Field
+            label="Ouvrir les actions des timers"
+            description="Maintiens la combinaison en jeu pour mettre en pause, relancer ou arrêter un timer."
+            childrenContainerWidth="max"
+          >
+            <Dropdown
+              rgOptions={shortcutOptions}
+              selectedOption={settings.shortcut ?? "l5_r5"}
+              onChange={(o) => updateSettings({ shortcut: o.data })}
+            />
+          </Field>
+        </PanelSectionRow>
         {state.overlay_error && (
           <PanelSectionRow>
             <div style={{ fontSize: 11, color: "#ff8080" }}>
@@ -542,11 +694,17 @@ export default definePlugin(() => {
   const listener = addEventListener<[{ id: string; name: string }]>("timer_finished", (t) => {
     toaster.toast({
       title: `⏰ ${t?.name ?? "Timer"} terminé`,
-      body: "Le temps continue en négatif – ouvre le menu pour l'arrêter.",
       playSound: true,
       showToast: true,
+      body: SHORTCUTS[latestState?.settings.shortcut ?? ""]
+        ? `Le temps continue en négatif – ${SHORTCUTS[latestState!.settings.shortcut].label.split(" (")[0]} pour l'arrêter.`
+        : "Le temps continue en négatif – ouvre le menu pour l'arrêter.",
     });
   });
+
+  // Load settings now so the shortcut works before the menu is ever opened.
+  getState().then(syncClock).catch(() => {});
+  const shortcutRegistration = registerShortcut();
 
   return {
     name: "Decky Timer",
@@ -555,6 +713,7 @@ export default definePlugin(() => {
     icon: <FaStopwatch />,
     onDismount() {
       removeEventListener("timer_finished", listener);
+      shortcutRegistration?.unregister?.();
     },
   };
 });

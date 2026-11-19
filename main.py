@@ -15,6 +15,7 @@ DEFAULT_SETTINGS = {
     "opacity": 0.75,
     "notify": True,            # toast when a timer reaches zero
     "display": ":0",           # gamescope's Xwayland used by Steam
+    "shortcut": "l5_r5",       # controller combo opening the timer actions (or "off")
 }
 
 # Environment variables set by Decky's bundled (PyInstaller) python that would
