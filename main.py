@@ -49,13 +49,13 @@ class Plugin:
         self._load()
         self._sync_overlay()
         self.watch_task = asyncio.get_event_loop().create_task(self._watch())
-        decky.logger.info("Timer Overlay loaded")
+        decky.logger.info("Decky Timer loaded")
 
     async def _unload(self):
         if self.watch_task:
             self.watch_task.cancel()
         self._stop_overlay()
-        decky.logger.info("Timer Overlay unloaded")
+        decky.logger.info("Decky Timer unloaded")
 
     async def _uninstall(self):
         self._stop_overlay()

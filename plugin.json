@@ -1,11 +1,11 @@
 {
-  "name": "Timer Overlay",
+  "name": "Decky Timer",
   "author": "powange",
   "flags": [],
   "api_version": 1,
   "publish": {
     "tags": ["timer", "overlay", "utility"],
     "description": "Named timers shown as an in-game overlay, with overtime counting.",
-    "image": "https://raw.githubusercontent.com/powange/decky-timer-overlay/main/assets/overlay-preview.png"
+    "image": "https://raw.githubusercontent.com/powange/decky-timer/main/assets/overlay-preview.png"
   }
 }

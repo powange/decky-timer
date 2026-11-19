@@ -4,9 +4,9 @@ name: Release
 # tagged v<version from package.json> if that release doesn't exist yet.
 # Bump "version" in package.json to publish a new release.
 #
-# The zip is always named decky-timer-overlay.zip, so this URL always points to
+# The zip is always named decky-timer.zip, so this URL always points to
 # the latest version (Decky > Developer > Install plugin from URL):
-#   https://github.com/powange/decky-timer-overlay/releases/latest/download/decky-timer-overlay.zip
+#   https://github.com/powange/decky-timer/releases/latest/download/decky-timer.zip
 # Once installed, the plugin's own "Mises à jour" button handles updates.
 on:
   push:
@@ -62,7 +62,7 @@ jobs:
         if: steps.version.outputs.exists == 'false'
         run: |
           pnpm run package
-          cd target && zip -r ../decky-timer-overlay.zip decky-timer-overlay
+          cd target && zip -r ../decky-timer.zip decky-timer
 
       - name: Publish release
         if: steps.version.outputs.exists == 'false'
@@ -71,6 +71,6 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
           name: ${{ steps.version.outputs.tag }}
-          files: decky-timer-overlay.zip
+          files: decky-timer.zip
           generate_release_notes: true
           make_latest: true

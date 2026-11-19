@@ -175,7 +175,7 @@ class Overlay:
 
         self.win = XCreateWindow(self.dpy, root, 0, 0, self.width, self.height, 0, 32,
                                  INPUT_OUTPUT, vinfo.visual, mask, byref(attrs))
-        XStoreName(self.dpy, self.win, b"Timer Overlay")
+        XStoreName(self.dpy, self.win, b"Decky Timer")
 
         # Ask gamescope to composite this window on top of everything.
         one = c_long(1)

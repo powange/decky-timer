@@ -1,4 +1,4 @@
-# Timer Overlay – plugin Decky Loader
+# decky-timer – plugin Decky Loader
 
 Des timers nommés pour le Steam Deck, affichés **en overlay par-dessus le jeu**.
 
@@ -19,7 +19,7 @@ Des timers nommés pour le Steam Deck, affichés **en overlay par-dessus le jeu*
 1. Dans Decky : *Paramètres → Développeur*, active le mode développeur.
 2. *Installer un plugin depuis une URL* :
    ```
-   https://github.com/powange/decky-timer-overlay/releases/latest/download/decky-timer-overlay.zip
+   https://github.com/powange/decky-timer/releases/latest/download/decky-timer.zip
    ```
 3. Ensuite, les mises à jour se font avec le bouton **Mises à jour** en bas du plugin.
 
@@ -31,15 +31,15 @@ Le dessin se fait avec cairo via `ctypes`. `libX11`, `libXext` et `libcairo` son
 
 ## Dépannage
 
-- Si l'overlay n'apparaît pas, une erreur s'affiche dans la section *Overlay en jeu*. Les détails sont dans `~/homebrew/logs/Timer Overlay/overlay.log`.
-- L'affichage X utilisé est `:0` par défaut. Il peut être changé dans `~/homebrew/settings/Timer Overlay/state.json` (clé `display`).
+- Si l'overlay n'apparaît pas, une erreur s'affiche dans la section *Overlay en jeu*. Les détails sont dans `~/homebrew/logs/Decky Timer/overlay.log`.
+- L'affichage X utilisé est `:0` par défaut. Il peut être changé dans `~/homebrew/settings/Decky Timer/state.json` (clé `display`).
 
 ## Développement
 
 ```bash
 pnpm install
 pnpm run build        # dist/index.js
-pnpm run package      # target/decky-timer-overlay/
+pnpm run package      # target/decky-timer/
 ```
 
 Pour publier une release, augmente `version` dans `package.json` et pousse sur `main`. Le workflow `release.yml` construit le zip et crée la release `v<version>`.

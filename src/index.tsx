@@ -260,10 +260,10 @@ function TimerEditorModal({
 // --------------------------------------------------------------------------
 
 // Releases are published by .github/workflows/release.yml.
-const UPDATE_REPO = "powange/decky-timer-overlay";
-const UPDATE_ASSET = "decky-timer-overlay.zip";
+const UPDATE_REPO = "powange/decky-timer";
+const UPDATE_ASSET = "decky-timer.zip";
 // Must match "name" in plugin.json so Decky replaces the installed plugin.
-const PLUGIN_NAME = "Timer Overlay";
+const PLUGIN_NAME = "Decky Timer";
 // Decky's PluginInstallType.UPDATE
 const INSTALL_TYPE_UPDATE = 2;
 
@@ -549,8 +549,8 @@ export default definePlugin(() => {
   });
 
   return {
-    name: "Timer Overlay",
-    titleView: <div className={staticClasses.Title}>Timer Overlay</div>,
+    name: "Decky Timer",
+    titleView: <div className={staticClasses.Title}>Decky Timer</div>,
     content: <Content />,
     icon: <FaStopwatch />,
     onDismount() {
