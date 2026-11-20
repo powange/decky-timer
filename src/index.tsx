@@ -138,28 +138,45 @@ const modalButtons: CSSProperties = {
   marginTop: 16,
 };
 
+// Closes the dialog, then the Quick Access panel. Leaving the panel open
+// behind a closed dialog could leave controller focus stuck in game.
+function closeEverything(closeModal?: () => void) {
+  closeModal?.();
+  setTimeout(() => {
+    try {
+      Navigation.CloseSideMenus();
+    } catch (e) {
+      console.error("Decky Timer: cannot close side menus", e);
+    }
+  }, 150);
+}
+
 function ActiveTimerModal({
   timer,
   closeModal,
   onState,
+  fromShortcut = false,
 }: {
   timer: Timer;
   closeModal?: () => void;
   onState: (s: State) => void;
+  fromShortcut?: boolean;
 }) {
   const [t, setT] = useState<Timer>(timer);
   useTick();
 
-  const run = async (fn: () => Promise<State>, close = false) => {
+  // Any action closes the dialog and the Quick Access panel.
+  const run = async (fn: () => Promise<State>) => {
     const s = syncClock(await fn());
     onState(s);
     const updated = s.timers.find((x) => x.id === t.id);
-    if (close || !updated) closeModal?.();
-    else setT(updated);
+    if (updated) setT(updated);
+    closeEverything(closeModal);
   };
+  const dismiss = () => (fromShortcut ? closeEverything(closeModal) : closeModal?.());
 
   return (
-    <ModalRoot onCancel={closeModal}>
+    <ModalRoot onCancel={dismiss}>
       <div style={{ textAlign: "center" }}>
         <div style={{ fontSize: 18, color: "#ccc" }}>{t.name}</div>
         <div style={{ fontSize: 48, fontWeight: "bold", fontFamily: "monospace", color: timerColor(t) }}>
@@ -172,13 +189,13 @@ function ActiveTimerModal({
       </div>
       <Focusable style={modalButtons}>
         {t.paused ? (
-          <DialogButton onClick={() => run(() => resumeTimer(t.id), true)}>Reprendre</DialogButton>
+          <DialogButton onClick={() => run(() => resumeTimer(t.id))}>Reprendre</DialogButton>
         ) : (
-          <DialogButton onClick={() => run(() => pauseTimer(t.id), true)}>Pause</DialogButton>
+          <DialogButton onClick={() => run(() => pauseTimer(t.id))}>Pause</DialogButton>
         )}
-        <DialogButton onClick={() => run(() => stopTimer(t.id), true)}>Arrêter</DialogButton>
-        <DialogButton onClick={() => run(() => restartTimer(t.id), true)}>Relancer depuis le début</DialogButton>
-        <DialogButton onClick={closeModal}>Fermer</DialogButton>
+        <DialogButton onClick={() => run(() => stopTimer(t.id))}>Arrêter</DialogButton>
+        <DialogButton onClick={() => run(() => restartTimer(t.id))}>Relancer depuis le début</DialogButton>
+        <DialogButton onClick={dismiss}>Fermer</DialogButton>
       </Focusable>
     </ModalRoot>
   );
@@ -200,9 +217,11 @@ function TimerPickerModal({
 }) {
   useTick();
   const timers = [...(latestState?.timers ?? [])].sort(byUrgency);
+  // The picker is only opened by the controller shortcut.
+  const dismiss = () => closeEverything(closeModal);
 
   return (
-    <ModalRoot onCancel={closeModal}>
+    <ModalRoot onCancel={dismiss}>
       <div style={{ fontSize: 18, fontWeight: "bold", marginBottom: 8 }}>Timers en cours</div>
       <Focusable style={modalButtons}>
         {timers.map((t) => (
@@ -210,7 +229,7 @@ function TimerPickerModal({
             key={t.id}
             onClick={() => {
               closeModal?.();
-              showModal(<ActiveTimerModal timer={t} onState={onState} />);
+              showModal(<ActiveTimerModal timer={t} onState={onState} fromShortcut />);
             }}
           >
             <div style={{ display: "flex", justifyContent: "space-between" }}>
@@ -224,7 +243,7 @@ function TimerPickerModal({
             </div>
           </DialogButton>
         ))}
-        <DialogButton onClick={closeModal}>Fermer</DialogButton>
+        <DialogButton onClick={dismiss}>Fermer</DialogButton>
       </Focusable>
     </ModalRoot>
   );
@@ -263,7 +282,7 @@ async function openQuickControls() {
   const onState = (s: State) => syncClock(s);
   setTimeout(() => {
     if (state.timers.length === 1) {
-      showModal(<ActiveTimerModal timer={state.timers[0]} onState={onState} />);
+      showModal(<ActiveTimerModal timer={state.timers[0]} onState={onState} fromShortcut />);
     } else {
       showModal(<TimerPickerModal onState={onState} />);
     }
