@@ -52,6 +52,7 @@ interface Settings {
   position: string;
   size: string;
   opacity: number;
+  overlay_last_minutes: number;
   notify: boolean;
   display: string;
   shortcut: string;
@@ -130,6 +131,16 @@ function formatDuration(seconds: number): string {
 }
 
 const timerColor = (t: Timer) => (t.paused ? "#ffc84d" : remainingOf(t) <= 0 ? "#ff5c5c" : "#ffffff");
+
+// Only this small component re-renders every tick, not the whole panel.
+function LiveTime({ t }: { t: Timer }) {
+  useTick();
+  return (
+    <span style={{ fontFamily: "monospace", fontWeight: "bold", color: timerColor(t), marginLeft: 8 }}>
+      {formatSeconds(remainingOf(t))}
+    </span>
+  );
+}
 
 function useTick(ms = 250) {
   const [, setTick] = useState(0);
@@ -447,6 +458,23 @@ const INSTALL_TYPE_UPDATE = 2;
 
 let updateCheckedThisSession = false;
 
+let pendingSettings: Partial<Settings> = {};
+let settingsTimer: ReturnType<typeof setTimeout> | null = null;
+function queueSettingsSave(patch: Partial<Settings>, onSaved: (s: State) => void) {
+  pendingSettings = { ...pendingSettings, ...patch };
+  if (settingsTimer) clearTimeout(settingsTimer);
+  settingsTimer = setTimeout(async () => {
+    const toSave = pendingSettings;
+    pendingSettings = {};
+    settingsTimer = null;
+    try {
+      onSaved(await saveSettings(toSave));
+    } catch (e) {
+      console.error("Decky Timer: settings not saved", e);
+    }
+  }, 300);
+}
+
 // Compares "v1.2.3" / "1.2.3" numerically: >0 when a is newer than b.
 function compareVersions(a: string, b: string): number {
   const parse = (v: string) => v.replace(/^v/, "").split(/[.-]/).map((x) => parseInt(x, 10) || 0);
@@ -563,6 +591,11 @@ const alarmMaxOptions = [
 
 const intervalOptions = [10, 20, 30, 60].map((s) => ({ data: s, label: `Toutes les ${s} s` }));
 
+const lastMinutesOptions = [
+  { data: 0, label: "Toujours" },
+  ...[1, 5, 10, 30].map((m) => ({ data: m, label: `${m} dernière${m > 1 ? "s" : ""} min` })),
+];
+
 const sizeOptions = [
   { data: "small", label: "Petite" },
   { data: "medium", label: "Moyenne" },
@@ -573,7 +606,6 @@ const sizeOptions = [
 function Content() {
   const [state, setState] = useState<State | null>(null);
   const [editMode, setEditMode] = useState(false);
-  useTick();
 
   const apply = (s: State) => setState(syncClock(s));
   const refresh = () => getState().then(apply).catch(() => {});
@@ -594,9 +626,10 @@ function Content() {
   }
 
   const { timers, presets, settings } = state;
-  const updateSettings = async (patch: Partial<Settings>) => {
-    setState({ ...state, settings: { ...settings, ...patch } });
-    apply(await saveSettings(patch));
+  // Optimistic update now, backend save once the user stops moving a slider.
+  const updateSettings = (patch: Partial<Settings>) => {
+    setState((prev) => (prev ? { ...prev, settings: { ...prev.settings, ...patch } } : prev));
+    queueSettingsSave(patch, apply);
   };
 
   const openActive = (t: Timer) =>
@@ -616,9 +649,7 @@ function Content() {
                     {t.paused ? "⏸ " : ""}
                     {t.name}
                   </span>
-                  <span style={{ fontFamily: "monospace", fontWeight: "bold", color: timerColor(t), marginLeft: 8 }}>
-                    {formatSeconds(remainingOf(t))}
-                  </span>
+                  <LiveTime t={t} />
                 </div>
               </ButtonItem>
             </PanelSectionRow>
@@ -697,16 +728,13 @@ function Content() {
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     ▶ {p.name}
                   </span>
-                  <span
-                    style={{
-                      fontFamily: "monospace",
-                      marginLeft: 8,
-                      color: running ? timerColor(running) : "#aaa",
-                      fontWeight: running ? "bold" : "normal",
-                    }}
-                  >
-                    {running ? formatSeconds(remainingOf(running)) : formatDuration(p.duration)}
-                  </span>
+                  {running ? (
+                    <LiveTime t={running} />
+                  ) : (
+                    <span style={{ fontFamily: "monospace", marginLeft: 8, color: "#aaa" }}>
+                      {formatDuration(p.duration)}
+                    </span>
+                  )}
                 </div>
               </ButtonItem>
             </PanelSectionRow>
@@ -764,6 +792,15 @@ function Content() {
               rgOptions={sizeOptions}
               selectedOption={settings.size}
               onChange={(o) => updateSettings({ size: o.data })}
+            />
+          </Field>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <Field label="Afficher" childrenContainerWidth="max">
+            <Dropdown
+              rgOptions={lastMinutesOptions}
+              selectedOption={settings.overlay_last_minutes ?? 0}
+              onChange={(o) => updateSettings({ overlay_last_minutes: o.data })}
             />
           </Field>
         </PanelSectionRow>
@@ -865,7 +902,16 @@ function Content() {
         <PanelSectionRow>
           <div style={{ fontSize: 12, color: "#999", lineHeight: 1.4 }}>
             Maintiens la combinaison en jeu pour mettre en pause, relancer ou arrêter un timer.
-            <div style={{ color: state.controller_status === "Manette détectée" ? "#7c7" : "#ff8080" }}>
+            <div
+              style={{
+                color:
+                  state.controller_status === "Manette détectée"
+                    ? "#7c7"
+                    : state.controller_status === "Raccourci désactivé"
+                      ? "#999"
+                      : "#ff8080",
+              }}
+            >
               {state.controller_status}
             </div>
           </div>

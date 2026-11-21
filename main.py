@@ -20,6 +20,7 @@ DEFAULT_SETTINGS = {
                                # (top-right sits under the Quick Access menu)
     "size": "medium",          # small | medium | large | xlarge
     "opacity": 0.75,
+    "overlay_last_minutes": 0, # only show a timer in its last N minutes (0 = always)
     "notify": True,            # toast when a timer reaches zero
     "display": ":0",           # gamescope's Xwayland used by Steam
     "shortcut": "l5_r5",       # controller combo opening the timer actions (or "off")
@@ -157,6 +158,7 @@ class Plugin:
         self.controller_status = "Initialisation…"
         self.reader_stop = threading.Event()
         self.reader_threads = {}
+        self.ignored_nodes = set()   # Deck HID interfaces that send no controller state
         self.alarm_wav = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "alarm.wav")
         self.alarm_proc = None
         self.alarm_last = {}       # timer id -> time of the last alarm
@@ -304,6 +306,7 @@ class Plugin:
             timers = [{"id": "preview", "name": "Aperçu", "end_at": self.preview_until + 290,
                        "remaining": None, "paused": False}] + timers
         settings = {k: self.settings.get(k) for k in ("position", "size", "opacity")}
+        settings["last_minutes"] = self.settings.get("overlay_last_minutes", 0)
         return json.dumps({"timers": timers, "settings": settings}) + "\n"
 
     def _start_overlay(self):
@@ -537,7 +540,18 @@ class Plugin:
     def _controller_supervisor(self):
         """Keeps one reader thread per Deck hidraw node (survives suspend)."""
         while not self.reader_stop.is_set():
-            nodes = _find_deck_hidraw()
+            if self.settings.get("shortcut") not in SHORTCUTS:
+                # Shortcut off: readers exit by themselves, start none (no
+                # 250 Hz wake-ups for nothing).
+                self.controller_status = "Raccourci désactivé"
+                self.reader_stop.wait(2)
+                continue
+            all_nodes = _find_deck_hidraw()
+            if all_nodes != getattr(self, "_last_nodes", None):
+                # Devices renumbered (resume, reconnect): re-check every node.
+                self.ignored_nodes.clear()
+                self._last_nodes = all_nodes
+            nodes = [n for n in all_nodes if n not in self.ignored_nodes]
             for node in nodes:
                 t = self.reader_threads.get(node)
                 if t is None or not t.is_alive():
@@ -565,15 +579,22 @@ class Plugin:
         decky.logger.info(f"Reading controller from {node}")
         held_since = None
         fired = False
+        other_reports = 0
         try:
             while not self.reader_stop.is_set():
                 report = os.read(fd, 64)
                 if len(report) != 64 or report[0] != 1 or report[1] != 0 or report[2] != 9:
+                    other_reports += 1
+                    if other_reports >= 20 and held_since is None and not fired:
+                        # Keyboard/mouse interface of the Deck: not the controller.
+                        self.ignored_nodes.add(node)
+                        decky.logger.info(f"Ignoring {node}: no controller reports")
+                        return
                     continue
+                other_reports = -10**9  # a controller node is never ignored
                 combo = SHORTCUTS.get(self.settings.get("shortcut", ""))
                 if not combo:
-                    held_since = None
-                    continue
+                    return  # shortcut turned off: stop reading
                 if all(_pressed(report, b) for b in combo):
                     now = time.monotonic()
                     if held_since is None:

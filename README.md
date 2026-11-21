@@ -32,6 +32,8 @@ Decky n'affiche normalement rien pendant une partie, en dehors du menu d'accès 
 
 Le dessin se fait avec cairo via `ctypes`. `libX11`, `libXext` et `libcairo` sont déjà présents sur SteamOS, donc il n'y a rien à compiler. Le processus ne tourne que lorsqu'au moins un timer est actif.
 
+Côté ressources, l'overlay ne se réveille qu'au changement de seconde affichée (jamais si tout est en pause), ne repeint que la zone des cartes, et sa fenêtre est retirée de l'écran quand rien n'est affiché. L'option « Afficher : N dernières minutes » évite à gamescope de composer l'overlay pendant les longs timers. La manette n'est lue que si le raccourci est activé, et seulement sur son interface manette.
+
 ## Dépannage
 
 - Si l'overlay n'apparaît pas ou si l'alarme ne sonne pas, une erreur s'affiche dans la section concernée, avec le chemin exact du journal (`overlay.log` ou `alarm.log`) dans le dossier de logs du plugin. Après 3 échecs de suite, l'overlay n'est plus relancé : change un réglage pour réessayer.

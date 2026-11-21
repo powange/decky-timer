@@ -102,6 +102,7 @@ XChangeProperty = _sig(x11, "XChangeProperty", c_int, c_void_p, c_ulong, c_ulong
                        c_void_p, c_int)
 XStoreName = _sig(x11, "XStoreName", c_int, c_void_p, c_ulong, c_char_p)
 XMapWindow = _sig(x11, "XMapWindow", c_int, c_void_p, c_ulong)
+XUnmapWindow = _sig(x11, "XUnmapWindow", c_int, c_void_p, c_ulong)
 XFlush = _sig(x11, "XFlush", c_int, c_void_p)
 XPending = _sig(x11, "XPending", c_int, c_void_p)
 XNextEvent = _sig(x11, "XNextEvent", c_int, c_void_p, c_void_p)
@@ -121,6 +122,8 @@ c_close_path = _sig(cairo, "cairo_close_path", None, c_void_p)
 c_arc = _sig(cairo, "cairo_arc", None, c_void_p, c_double, c_double, c_double, c_double, c_double)
 c_rectangle = _sig(cairo, "cairo_rectangle", None, c_void_p, c_double, c_double, c_double, c_double)
 c_fill = _sig(cairo, "cairo_fill", None, c_void_p)
+c_clip = _sig(cairo, "cairo_clip", None, c_void_p)
+c_reset_clip = _sig(cairo, "cairo_reset_clip", None, c_void_p)
 c_fill_preserve = _sig(cairo, "cairo_fill_preserve", None, c_void_p)
 c_stroke = _sig(cairo, "cairo_stroke", None, c_void_p)
 c_set_line_width = _sig(cairo, "cairo_set_line_width", None, c_void_p, c_double)
@@ -193,7 +196,10 @@ class Overlay:
             except AttributeError:
                 pass
 
-        XMapWindow(self.dpy, self.win)
+        # Not mapped yet: render() maps the window only while cards are shown,
+        # so an empty overlay costs gamescope nothing.
+        self.mapped = False
+        self.last_bbox = None
         XFlush(self.dpy)
 
         self.surface = c_surface_create(self.dpy, self.win, vinfo.visual, self.width, self.height)
@@ -235,9 +241,59 @@ class Overlay:
         c_arc(cr, x + r, y + r, r, math.pi, 3 * math.pi / 2)
         c_close_path(cr)
 
+    def _layout(self, rows, settings):
+        """Card geometry: (boxes, bbox) with bbox = (x0, y0, x1, y1) or None."""
+        if not rows:
+            return [], None
+        scale = SIZES.get(settings.get("size", "medium"), 1.0)
+        position = settings.get("position", "top-center")
+        name_size = 13 * scale
+        time_size = 26 * scale
+        pad_x = 12 * scale
+        gap = 6 * scale
+        margin = 12 * scale
+        box_h = 7 * scale * 2 + name_size + 4 * scale + time_size
+        widths = []
+        for name, time_text, state in rows:
+            label = name if state != "pause" else f"{name} · pause"
+            widths.append(max(self._text_width(label, name_size, False),
+                              self._text_width(time_text, time_size, True)) + pad_x * 2)
+        w = max(max(widths), 110 * scale)
+        total_h = len(rows) * box_h + (len(rows) - 1) * gap
+        y = margin if position.startswith("top") else self.height - margin - total_h
+        if position.endswith("left"):
+            x = margin
+        elif position.endswith("center"):
+            x = (self.width - w) / 2
+        else:
+            x = self.width - margin - w
+        return (x, y, w, box_h, gap), (x - 4, y - 4, x + w + 4, y + total_h + 4)
+
     def render(self, rows, settings):
-        """rows: list of (name, time_text, state) with state in run|pause|over."""
+        """rows: list of (name, time_text, state) with state in run|pause|over.
+
+        Only the area covered by the cards (now and before) is repainted, and
+        the window is unmapped when there is nothing to show.
+        """
         cr = self.cr
+        _, bbox = self._layout(rows, settings)
+        if bbox is None:
+            if self.mapped:
+                XUnmapWindow(self.dpy, self.win)
+                self.mapped = False
+                XFlush(self.dpy)
+            self.last_bbox = None
+            return
+        if not self.mapped:
+            XMapWindow(self.dpy, self.win)
+            self.mapped = True
+            self.last_bbox = (0, 0, self.width, self.height)  # first paint: everything
+        dirty = bbox if self.last_bbox is None else (
+            min(bbox[0], self.last_bbox[0]), min(bbox[1], self.last_bbox[1]),
+            max(bbox[2], self.last_bbox[2]), max(bbox[3], self.last_bbox[3]))
+        self.last_bbox = bbox
+        c_rectangle(cr, dirty[0], dirty[1], dirty[2] - dirty[0], dirty[3] - dirty[1])
+        c_clip(cr)
         c_push_group(cr)
         c_set_operator(cr, CAIRO_OPERATOR_SOURCE)
         c_set_rgba(cr, 0, 0, 0, 0)
@@ -247,7 +303,7 @@ class Overlay:
         if rows:
             scale = SIZES.get(settings.get("size", "medium"), 1.0)
             opacity = max(0.0, min(1.0, float(settings.get("opacity", 0.75))))
-            position = settings.get("position", "top-right")
+            position = settings.get("position", "top-center")
 
             name_size = 13 * scale
             time_size = 26 * scale
@@ -307,6 +363,7 @@ class Overlay:
         c_pop_group_to_source(cr)
         c_set_operator(cr, CAIRO_OPERATOR_SOURCE)
         c_paint(cr)
+        c_reset_clip(cr)
         c_surface_flush(self.surface)
         XFlush(self.dpy)
 
@@ -336,20 +393,57 @@ def format_seconds(value):
     return f"{sign}{m:02d}:{s:02d}"
 
 
+def _remaining(t, now):
+    if t.get("paused"):
+        return float(t.get("remaining") or 0)
+    return float(t.get("end_at") or now) - now
+
+
+def _show_limit(state):
+    """Seconds left under which a timer is shown (None = always shown)."""
+    minutes = int(state.get("settings", {}).get("last_minutes") or 0)
+    return minutes * 60 if minutes > 0 else None
+
+
 def build_rows(state, now):
     rows = []
+    limit = _show_limit(state)
     for t in state.get("timers", []):
+        remaining = _remaining(t, now)
+        if limit is not None and remaining > limit:
+            continue  # "only the last N minutes"
         if t.get("paused"):
-            remaining = float(t.get("remaining") or 0)
             status = "pause"
         else:
-            remaining = float(t.get("end_at") or now) - now
             status = "run" if remaining > 0 else "over"
         name = " ".join(str(t.get("name") or "Timer").split())
         if len(name) > NAME_MAX:
             name = name[:NAME_MAX - 1] + "…"
         rows.append((name, format_seconds(remaining), status))
     return rows
+
+
+def seconds_until_change(state, now):
+    """Time until the displayed text can change; None = only on new input.
+
+    The overlay sleeps exactly that long instead of polling 5 times a second.
+    """
+    limit = _show_limit(state)
+    waits = []
+    for t in state.get("timers", []):
+        if t.get("paused"):
+            continue
+        r = _remaining(t, now)
+        if limit is not None and r > limit:
+            waits.append(r - limit)  # hidden: only wake up when it appears
+            continue
+        # Positive values show ceil(r), negative ones floor(-r): both change
+        # when r crosses an integer.
+        frac = r - math.floor(r)
+        waits.append(frac if frac > 0 else 1.0)
+    if not waits:
+        return None
+    return max(0.01, min(waits) + 0.005)
 
 
 def main():
@@ -361,7 +455,8 @@ def main():
     os.set_blocking(stdin_fd, False)
 
     while True:
-        readable, _, _ = select.select([stdin_fd, overlay.fd], [], [], 0.2)
+        timeout = seconds_until_change(state, time.time())
+        readable, _, _ = select.select([stdin_fd, overlay.fd], [], [], timeout)
         if stdin_fd in readable:
             try:
                 chunk = os.read(stdin_fd, 65536)
