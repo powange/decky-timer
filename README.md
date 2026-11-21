@@ -11,9 +11,10 @@ Des timers nommés pour le Steam Deck, affichés **en overlay par-dessus le jeu*
 - **Plusieurs timers en même temps**, empilés dans l'overlay.
 - **Temps dépassé** : à zéro, le timer continue en négatif (en rouge) et une notification s'affiche.
 - **Alarme sonore** : un bip d'alarme dédié retentit à la fin, puis se répète (toutes les 10 à 60 s) tant que le timer est en négatif et n'est ni en pause ni arrêté. Volume réglable et bouton de test. Le son est généré par le plugin et joué via PipeWire (`pw-play`).
-- **Contrôle** : touche un timer en cours dans le menu pour le mettre en pause, le reprendre, le relancer ou l'arrêter.
+- **Contrôle** : touche un timer en cours pour le mettre en pause, le reprendre, ajouter +1 / +5 min, le relancer, l'arrêter, couper son alarme ou le reporter (« Rappel dans 5 min »).
 - **Raccourci manette** : maintiens une combinaison en jeu (L5 + R5 par défaut, ou L4 + R4, Select + Start) pour ouvrir directement le menu pause / relancer / arrêter. S'il y a plusieurs timers, une liste triée par urgence s'affiche. Comme decky-macro, la manette est lue directement (hidraw), donc ça marche en jeu, et le plugin tourne en root pour y accéder (l'overlay, lui, tourne sous l'utilisateur normal). Toucher l'overlay lui-même n'est pas possible : gamescope envoie le tactile au jeu.
-- **Overlay réglable** : position (coins / haut centre), taille, opacité du fond, on/off.
+- **Overlay réglable** : position (en haut au centre par défaut, pour ne pas passer sous le menu d'accès rapide), taille, opacité du fond, on/off, et un bouton d'aperçu de 10 s. L'overlay ne s'affiche qu'en mode jeu, jamais sur le bureau.
+- **Saisie rapide** : durées toutes prêtes (1, 5, 10, 15, 30 min), confirmation avant de lancer un second exemplaire d'un timer déjà en cours, temps restant affiché sur son bouton.
 - **Mise à jour intégrée** : le plugin vérifie la dernière release GitHub et l'installe via l'installeur de Decky. Plus besoin de retaper l'URL.
 
 ## Installation

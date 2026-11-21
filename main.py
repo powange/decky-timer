@@ -16,7 +16,8 @@ import decky
 
 DEFAULT_SETTINGS = {
     "overlay_enabled": True,
-    "position": "top-right",   # top-left | top-center | top-right | bottom-left | bottom-right
+    "position": "top-center",  # top-left | top-center | top-right | bottom-left | bottom-right
+                               # (top-right sits under the Quick Access menu)
     "size": "medium",          # small | medium | large | xlarge
     "opacity": 0.75,
     "notify": True,            # toast when a timer reaches zero
@@ -33,6 +34,19 @@ NAME_MAX = 24               # characters kept in a timer name
 LOG_MAX_BYTES = 256 * 1024  # overlay.log is rotated past this size
 OVERLAY_MAX_FAILURES = 3    # consecutive crashes before giving up
 OVERLAY_HEALTHY_AFTER = 60  # seconds of uptime that reset the crash count
+PREVIEW_SECONDS = 10        # how long the overlay preview stays on screen
+
+
+def _gamescope_running():
+    """True when the Game Mode session (gamescope) is up: no overlay on the desktop."""
+    for comm in glob.glob("/proc/[0-9]*/comm"):
+        try:
+            with open(comm) as f:
+                if f.read().startswith("gamescope"):
+                    return True
+        except OSError:
+            continue
+    return False
 
 
 def _clean_name(name):
@@ -135,6 +149,9 @@ class Plugin:
         self.overlay_failures = 0
         self.proc_started = 0.0
         self.dying = []            # (proc, deadline) of overlays being stopped
+        self.preview_until = 0.0
+        self.game_mode = True
+        self.game_mode_checked = 0.0
         self.watch_task = None
         self.loop = None
         self.controller_status = "Initialisation…"
@@ -246,6 +263,7 @@ class Plugin:
             "controller_status": self.controller_status,
             "alarm_error": self.alarm_error,
             "log_dir": decky.DECKY_PLUGIN_LOG_DIR,
+            "game_mode": self.game_mode,
         }
 
     def _changed(self):
@@ -260,7 +278,21 @@ class Plugin:
     # Overlay process
     # ------------------------------------------------------------------ #
 
+    def _in_game_mode(self):
+        # Cached: scanning /proc every half second would be wasteful.
+        if _now() - self.game_mode_checked > 5:
+            self.game_mode = _gamescope_running()
+            self.game_mode_checked = _now()
+        return self.game_mode
+
+    def _preview_active(self):
+        return _now() < self.preview_until
+
     def _overlay_wanted(self):
+        if not self._in_game_mode():
+            return False
+        if self._preview_active():
+            return True
         return bool(self.settings.get("overlay_enabled")) and len(self.timers) > 0
 
     def _overlay_payload(self):
@@ -268,6 +300,9 @@ class Plugin:
             {k: t.get(k) for k in ("id", "name", "end_at", "remaining", "paused")}
             for t in self.timers
         ]
+        if self._preview_active():
+            timers = [{"id": "preview", "name": "Aperçu", "end_at": self.preview_until + 290,
+                       "remaining": None, "paused": False}] + timers
         settings = {k: self.settings.get(k) for k in ("position", "size", "opacity")}
         return json.dumps({"timers": timers, "settings": settings}) + "\n"
 
@@ -483,6 +518,10 @@ class Plugin:
                             await decky.emit("timer_finished", {"id": t["id"], "name": t["name"]})
                 self._alarm_tick(now)
                 self._reap()
+                # End of the overlay preview: hide it (or show the real timers).
+                if self.preview_until and now >= self.preview_until:
+                    self.preview_until = 0.0
+                    self._sync_overlay()
                 # Restart a crashed overlay.
                 if self._overlay_wanted() and (self.proc is None or self.proc.poll() is not None):
                     self._sync_overlay()
@@ -620,6 +659,41 @@ class Plugin:
             t["notified"] = False
             t["alarm_muted"] = False
         return self._changed()
+
+    async def add_time(self, timer_id: str, seconds: float):
+        """+1 min / +5 min. Back above zero, the timer can ring again."""
+        t = self._find_timer(timer_id)
+        if t:
+            seconds = int(seconds)
+            if t["paused"]:
+                t["remaining"] = float(t["remaining"] or 0) + seconds
+                remaining = t["remaining"]
+            else:
+                t["end_at"] = float(t["end_at"] or _now()) + seconds
+                remaining = t["end_at"] - _now()
+            if remaining > 0:
+                t["notified"] = False
+                t["alarm_muted"] = False
+        return self._changed()
+
+    async def snooze_timer(self, timer_id: str, seconds: float = 300):
+        """"Rappel dans 5 min": the timer restarts from that delay, running."""
+        t = self._find_timer(timer_id)
+        if t:
+            t["end_at"] = _now() + int(seconds)
+            t["remaining"] = None
+            t["paused"] = False
+            t["notified"] = False
+            t["alarm_muted"] = False
+        return self._changed()
+
+    async def preview_overlay(self):
+        self.preview_until = _now() + PREVIEW_SECONDS
+        self.overlay_failures = 0
+        self.overlay_error = ""
+        self.game_mode_checked = 0.0
+        self._sync_overlay()
+        return self._state()
 
     async def mute_alarm(self, timer_id: str):
         t = self._find_timer(timer_id)

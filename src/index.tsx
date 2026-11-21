@@ -1,5 +1,6 @@
 import {
   ButtonItem,
+  ConfirmModal,
   DialogButton,
   Dropdown,
   Field,
@@ -71,6 +72,7 @@ interface State {
   controller_status: string;
   alarm_error: string;
   log_dir: string;
+  game_mode: boolean;
 }
 
 const getState = callable<[], State>("get_state");
@@ -87,6 +89,9 @@ const movePreset = callable<[id: string, delta: number], State>("move_preset");
 const saveSettings = callable<[settings: Partial<Settings>], State>("save_settings");
 const testAlarm = callable<[], State>("test_alarm");
 const muteAlarm = callable<[id: string], State>("mute_alarm");
+const addTime = callable<[id: string, seconds: number], State>("add_time");
+const snoozeTimer = callable<[id: string, seconds: number], State>("snooze_timer");
+const previewOverlay = callable<[], State>("preview_overlay");
 
 // Must match NAME_MAX in main.py.
 const NAME_MAX = 24;
@@ -198,6 +203,17 @@ function ActiveTimerModal({
         {alarmRinging(t) && (
           <DialogButton onClick={() => run(() => muteAlarm(t.id))}>Couper l'alarme</DialogButton>
         )}
+        {remainingOf(t) <= 0 && !t.paused && (
+          <DialogButton onClick={() => run(() => snoozeTimer(t.id, 300))}>Rappel dans 5 min</DialogButton>
+        )}
+        <Focusable style={{ display: "flex", gap: 8 }}>
+          <DialogButton style={{ flex: 1, minWidth: 0 }} onClick={() => run(() => addTime(t.id, 60))}>
+            +1 min
+          </DialogButton>
+          <DialogButton style={{ flex: 1, minWidth: 0 }} onClick={() => run(() => addTime(t.id, 300))}>
+            +5 min
+          </DialogButton>
+        </Focusable>
         {t.paused ? (
           <DialogButton onClick={() => run(() => resumeTimer(t.id))}>Reprendre</DialogButton>
         ) : (
@@ -351,9 +367,24 @@ function TimerEditorModal({
         value={name}
         onChange={(e) => setName(e.target.value.slice(0, NAME_MAX))}
       />
+      <Focusable style={{ display: "flex", gap: 6, margin: "8px 0" }}>
+        {[1, 5, 10, 15, 30].map((min) => (
+          <DialogButton
+            key={min}
+            style={{ flex: 1, minWidth: 0, padding: "4px 0" }}
+            onClick={() => {
+              setH(0);
+              setM(min);
+              setS(0);
+            }}
+          >
+            {min} min
+          </DialogButton>
+        ))}
+      </Focusable>
       <SliderField label="Heures" value={h} min={0} max={12} step={1} showValue onChange={setH} />
       <SliderField label="Minutes" value={m} min={0} max={59} step={1} showValue onChange={setM} />
-      <SliderField label="Secondes" value={s} min={0} max={59} step={1} showValue onChange={setS} />
+      <SliderField label="Secondes" value={s} min={0} max={55} step={5} showValue onChange={setS} />
       <div style={{ textAlign: "center", fontSize: 22, fontFamily: "monospace", marginTop: 8 }}>
         {formatDuration(duration)}
       </div>
@@ -594,7 +625,20 @@ function Content() {
           ))}
           {timers.length > 1 && (
             <PanelSectionRow>
-              <ButtonItem layout="below" onClick={async () => apply(await stopAll())}>
+              <ButtonItem
+                layout="below"
+                onClick={() =>
+                  showModal(
+                    <ConfirmModal
+                      strTitle="Tout arrêter ?"
+                      strDescription={`Les ${timers.length} timers en cours seront arrêtés.`}
+                      strOKButtonText="Tout arrêter"
+                      strCancelButtonText="Annuler"
+                      onOK={async () => apply(await stopAll())}
+                    />
+                  )
+                }
+              >
                 Tout arrêter
               </ButtonItem>
             </PanelSectionRow>
@@ -603,24 +647,65 @@ function Content() {
       )}
 
       <PanelSection title="Mes timers">
-        {presets.map((p) => {
-          const running = timers.some((t) => t.preset_id === p.id);
+        {presets.map((p, i) => {
+          const running = timers.filter((t) => t.preset_id === p.id).sort(byUrgency)[0];
+          if (editMode) {
+            return (
+              <PanelSectionRow key={p.id}>
+                <Focusable style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <DialogButton style={{ flex: 1, minWidth: 0, textAlign: "left" }} onClick={() => openEditor(p)}>
+                    ✎ {p.name}
+                  </DialogButton>
+                  <DialogButton
+                    style={{ width: 40, minWidth: 40, padding: 0 }}
+                    disabled={i === 0}
+                    onClick={async () => apply(await movePreset(p.id, -1))}
+                  >
+                    ▲
+                  </DialogButton>
+                  <DialogButton
+                    style={{ width: 40, minWidth: 40, padding: 0 }}
+                    disabled={i === presets.length - 1}
+                    onClick={async () => apply(await movePreset(p.id, 1))}
+                  >
+                    ▼
+                  </DialogButton>
+                </Focusable>
+              </PanelSectionRow>
+            );
+          }
+          const launch = async () => apply(await startTimer(p.name, p.duration, p.id));
           return (
             <PanelSectionRow key={p.id}>
               <ButtonItem
                 layout="below"
-                onClick={async () =>
-                  editMode ? openEditor(p) : apply(await startTimer(p.name, p.duration, p.id))
+                onClick={() =>
+                  running
+                    ? showModal(
+                        <ConfirmModal
+                          strTitle={`${p.name} est déjà en cours`}
+                          strDescription={`Temps restant : ${formatSeconds(remainingOf(running))}. Lancer un second timer « ${p.name} » ?`}
+                          strOKButtonText="Lancer un autre"
+                          strCancelButtonText="Annuler"
+                          onOK={launch}
+                        />
+                      )
+                    : launch()
                 }
               >
                 <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
-                  <span>
-                    {editMode ? "✎ " : "▶ "}
-                    {p.name}
-                    {running && !editMode ? " •" : ""}
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    ▶ {p.name}
                   </span>
-                  <span style={{ fontFamily: "monospace", color: "#aaa", marginLeft: 8 }}>
-                    {formatDuration(p.duration)}
+                  <span
+                    style={{
+                      fontFamily: "monospace",
+                      marginLeft: 8,
+                      color: running ? timerColor(running) : "#aaa",
+                      fontWeight: running ? "bold" : "normal",
+                    }}
+                  >
+                    {running ? formatSeconds(remainingOf(running)) : formatDuration(p.duration)}
                   </span>
                 </div>
               </ButtonItem>
@@ -636,7 +721,7 @@ function Content() {
           <PanelSectionRow>
             <ToggleField
               label="Modifier mes timers"
-              description={editMode ? "Touche un timer pour le modifier, le déplacer ou le supprimer" : undefined}
+              description={editMode ? "✎ pour modifier ou supprimer, ▲ ▼ pour réordonner" : undefined}
               checked={editMode}
               onChange={setEditMode}
             />
@@ -645,6 +730,18 @@ function Content() {
       </PanelSection>
 
       <PanelSection title="Overlay en jeu">
+        {!state.game_mode && (
+          <PanelSectionRow>
+            <div style={{ fontSize: 12, color: "#999" }}>
+              Hors du mode jeu : l'overlay ne s'affiche pas sur le bureau.
+            </div>
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={async () => apply(await previewOverlay())}>
+            Aperçu de l'overlay (10 s)
+          </ButtonItem>
+        </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
             label="Afficher l'overlay"
