@@ -3,6 +3,7 @@ import glob
 import json
 import os
 import pwd
+import re
 import shutil
 import subprocess
 import threading
@@ -48,6 +49,81 @@ def _gamescope_running():
         except OSError:
             continue
     return False
+
+
+MAX_DURATION = 24 * 3600    # longest timer (seconds)
+MAX_ADD = 12 * 3600         # largest +time / snooze step (seconds)
+
+
+# ---- Input validation ------------------------------------------------------ #
+# The backend runs as root: every value coming from the frontend (or from an
+# old state.json) is checked against this whitelist before being used.
+def _bool(v):
+    if isinstance(v, bool):
+        return v
+    raise ValueError("not a boolean")
+
+
+def _choice(*allowed):
+    def check(v):
+        if v in allowed:
+            return v
+        raise ValueError(f"not one of {allowed}")
+    return check
+
+
+def _number(lo, hi, cast=float):
+    def check(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("not a number")
+        v = cast(v)
+        if not lo <= v <= hi:
+            raise ValueError(f"out of range [{lo}, {hi}]")
+        return v
+    return check
+
+
+def _display(v):
+    if isinstance(v, str) and re.fullmatch(r":\d{1,2}", v):
+        return v
+    raise ValueError("not an X display like :0")
+
+
+SETTINGS_SCHEMA = {
+    "overlay_enabled": _bool,
+    "position": _choice("top-left", "top-center", "top-right", "bottom-left", "bottom-right"),
+    "size": _choice("small", "medium", "large", "xlarge"),
+    "opacity": _number(0.0, 1.0),
+    "overlay_last_minutes": _number(0, 600, int),
+    "notify": _bool,
+    "display": _display,
+    "shortcut": lambda v: _choice("off", *SHORTCUTS)(v),  # SHORTCUTS is defined below
+    "alarm_enabled": _bool,
+    "alarm_repeat": _bool,
+    "alarm_interval": _number(5, 3600, int),
+    "alarm_volume": _number(0.0, 1.0),
+    "alarm_max_minutes": _number(0, 600, int),
+}
+
+
+def _valid_settings(raw):
+    """Known keys with valid values only; anything else is dropped and logged."""
+    out = {}
+    for key, value in (raw.items() if isinstance(raw, dict) else []):
+        check = SETTINGS_SCHEMA.get(key)
+        if check is None:
+            continue
+        try:
+            out[key] = check(value)
+        except (ValueError, TypeError) as e:
+            decky.logger.warning(f"Ignoring setting {key}={value!r}: {e}")
+    return out
+
+
+def _duration(v, lo=1, hi=MAX_DURATION):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ValueError("duration is not a number")
+    return int(max(lo, min(hi, v)))
 
 
 def _clean_name(name):
@@ -201,7 +277,7 @@ class Plugin:
                 data = json.load(f)
             self.presets = self._valid_presets(data.get("presets", []))
             self.timers = self._valid_timers(data.get("timers", []))
-            self.settings = {**DEFAULT_SETTINGS, **data.get("settings", {})}
+            self.settings = {**DEFAULT_SETTINGS, **_valid_settings(data.get("settings", {}))}
         except FileNotFoundError:
             pass
         except Exception as e:
@@ -252,6 +328,8 @@ class Plugin:
         tmp = self.state_path + ".tmp"
         with open(tmp, "w") as f:
             json.dump({"presets": self.presets, "timers": self.timers, "settings": self.settings}, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())  # survive a sudden power-off
         os.replace(tmp, self.state_path)
 
     def _state(self):
@@ -640,7 +718,9 @@ class Plugin:
     # Timers ----------------------------------------------------------- #
 
     async def start_timer(self, name: str, duration: float, preset_id: str = ""):
-        duration = max(1, int(duration))
+        duration = _duration(duration)
+        if preset_id and not any(p["id"] == preset_id for p in self.presets):
+            preset_id = ""
         now = _now()
         self.timers.append({
             "id": uuid.uuid4().hex[:10],
@@ -685,7 +765,7 @@ class Plugin:
         """+1 min / +5 min. Back above zero, the timer can ring again."""
         t = self._find_timer(timer_id)
         if t:
-            seconds = int(seconds)
+            seconds = _duration(seconds, 1, MAX_ADD)
             if t["paused"]:
                 t["remaining"] = float(t["remaining"] or 0) + seconds
                 remaining = t["remaining"]
@@ -701,7 +781,7 @@ class Plugin:
         """"Rappel dans 5 min": the timer restarts from that delay, running."""
         t = self._find_timer(timer_id)
         if t:
-            t["end_at"] = _now() + int(seconds)
+            t["end_at"] = _now() + _duration(seconds, 1, MAX_ADD)
             t["remaining"] = None
             t["paused"] = False
             t["notified"] = False
@@ -734,7 +814,7 @@ class Plugin:
 
     async def save_preset(self, preset_id: str, name: str, duration: float):
         name = _clean_name(name)
-        duration = max(1, int(duration))
+        duration = _duration(duration)
         existing = next((p for p in self.presets if p["id"] == preset_id), None) if preset_id else None
         if existing:
             existing["name"] = name
@@ -753,7 +833,8 @@ class Plugin:
     async def move_preset(self, preset_id: str, delta: int):
         idx = next((i for i, p in enumerate(self.presets) if p["id"] == preset_id), None)
         if idx is not None:
-            new = max(0, min(len(self.presets) - 1, idx + int(delta)))
+            delta = 1 if int(delta) > 0 else -1  # one step at a time
+            new = max(0, min(len(self.presets) - 1, idx + delta))
             self.presets.insert(new, self.presets.pop(idx))
         return self._changed()
 
@@ -768,9 +849,7 @@ class Plugin:
 
     async def save_settings(self, settings: dict):
         old_display = self.settings.get("display")
-        for key in DEFAULT_SETTINGS:
-            if key in settings:
-                self.settings[key] = settings[key]
+        self.settings.update(_valid_settings(settings))
         # A settings change is also a manual retry after overlay crashes.
         self.overlay_failures = 0
         self.overlay_error = ""

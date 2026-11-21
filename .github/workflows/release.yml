@@ -11,13 +11,47 @@ name: Release
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System libraries for the overlay tests
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb libx11-6 libxext6 libcairo2 fonts-dejavu-core
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python tests
+        run: |
+          pip install pytest
+          python -m pytest -q tests
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Typecheck frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run typecheck
+
   release:
+    needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

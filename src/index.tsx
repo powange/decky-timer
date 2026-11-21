@@ -451,6 +451,7 @@ function TimerEditorModal({
 // Releases are published by .github/workflows/release.yml.
 const UPDATE_REPO = "powange/decky-timer";
 const UPDATE_ASSET = "decky-timer.zip";
+const MANUAL_INSTALL_URL = `https://github.com/${UPDATE_REPO}/releases/latest/download/${UPDATE_ASSET}`;
 // Must match "name" in plugin.json so Decky replaces the installed plugin.
 const PLUGIN_NAME = "Decky Timer";
 // Decky's PluginInstallType.UPDATE
@@ -492,6 +493,7 @@ function UpdateSection() {
   const [latest, setLatest] = useState<{ tag: string; url: string } | null>(null);
   const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState<boolean>(false);
+  const [manualInstall, setManualInstall] = useState<boolean>(false);
 
   const check = async (version: string, silent = false) => {
     setBusy(true);
@@ -533,20 +535,31 @@ function UpdateSection() {
 
   const install = async () => {
     if (!latest) return;
+    // Internal Decky API (undocumented): if a Decky update breaks it, fall
+    // back to the manual install URL instead of failing silently.
     const backend = (window as any).DeckyBackend;
-    if (!backend?.call) {
-      setStatus("API d'installation de Decky indisponible – installe depuis l'URL");
+    if (typeof backend?.call !== "function") {
+      setManualInstall(true);
+      setStatus("Mise à jour automatique indisponible avec cette version de Decky.");
       return;
     }
-    // Opens Decky's own install confirmation, like the store does.
-    await backend.call(
-      "utilities/install_plugin",
-      latest.url,
-      PLUGIN_NAME,
-      latest.tag.replace(/^v/, ""),
-      "",
-      INSTALL_TYPE_UPDATE
-    );
+    try {
+      setBusy(true);
+      // Opens Decky's own install confirmation, like the store does.
+      await backend.call(
+        "utilities/install_plugin",
+        latest.url,
+        PLUGIN_NAME,
+        latest.tag.replace(/^v/, ""),
+        "",
+        INSTALL_TYPE_UPDATE
+      );
+    } catch (e: any) {
+      setManualInstall(true);
+      setStatus(`Échec de l'installation : ${e?.message ?? e}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -555,6 +568,12 @@ function UpdateSection() {
         <div style={{ fontSize: 12, color: "#bbb" }}>
           Installée : <b>{current || "…"}</b>
           {status && <div>{status}</div>}
+          {manualInstall && (
+            <div style={{ marginTop: 4, wordBreak: "break-all" }}>
+              Installe-la depuis Decky › Développeur › Installer depuis une URL :
+              <div style={{ fontFamily: "monospace", color: "#ddd" }}>{MANUAL_INSTALL_URL}</div>
+            </div>
+          )}
         </div>
       </PanelSectionRow>
       <PanelSectionRow>

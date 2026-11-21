@@ -34,6 +34,13 @@ Le dessin se fait avec cairo via `ctypes`. `libX11`, `libXext` et `libcairo` son
 
 Côté ressources, l'overlay ne se réveille qu'au changement de seconde affichée (jamais si tout est en pause), ne repeint que la zone des cartes, et sa fenêtre est retirée de l'écran quand rien n'est affiché. L'option « Afficher : N dernières minutes » évite à gamescope de composer l'overlay pendant les longs timers. La manette n'est lue que si le raccourci est activé, et seulement sur son interface manette.
 
+## Fiabilité et sécurité
+
+- **Mise en veille** : les timers suivent l'heure réelle. Le temps passé en veille ou Deck éteint compte, et un timer expiré entre-temps apparaît en négatif au réveil (l'alarme ne sonne pas s'il a dépassé l'arrêt automatique). Si l'horloge est corrigée au réveil (synchronisation réseau), les timers en cours sont décalés d'autant.
+- **Droits root** : nécessaires pour lire la manette. L'overlay et l'alarme tournent sous l'utilisateur normal. Toutes les valeurs reçues du panneau ou relues depuis `state.json` sont validées (liste blanche de réglages, bornes sur les durées), et aucune commande shell n'est lancée.
+- **Sauvegarde** : `state.json` est écrit de façon atomique et synchronisé sur le disque. Un fichier abîmé est réparé au chargement au lieu de faire planter le plugin.
+- **Mise à jour intégrée** : elle passe par une API interne de Decky. Si une version de Decky la casse, le panneau affiche l'URL d'installation manuelle.
+
 ## Dépannage
 
 - Si l'overlay n'apparaît pas ou si l'alarme ne sonne pas, une erreur s'affiche dans la section concernée, avec le chemin exact du journal (`overlay.log` ou `alarm.log`) dans le dossier de logs du plugin. Après 3 échecs de suite, l'overlay n'est plus relancé : change un réglage pour réessayer.
@@ -46,6 +53,8 @@ pnpm install
 pnpm run build        # dist/index.js
 pnpm run package      # target/decky-timer/
 ```
+
+Tests : `pip install pytest && python -m pytest tests` (les tests d'overlay utilisent Xvfb s'il est installé). La CI lance les tests et la vérification de types à chaque push et pull request, et ne publie une release que s'ils passent.
 
 Pour publier une release, augmente `version` dans `package.json` et pousse sur `main`. Le workflow `release.yml` construit le zip et crée la release `v<version>`.
 
