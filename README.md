@@ -33,7 +33,7 @@ Le dessin se fait avec cairo via `ctypes`. `libX11`, `libXext` et `libcairo` son
 
 ## Dépannage
 
-- Si l'overlay n'apparaît pas, une erreur s'affiche dans la section *Overlay en jeu*. Les détails sont dans `~/homebrew/logs/Decky Timer/overlay.log`.
+- Si l'overlay n'apparaît pas ou si l'alarme ne sonne pas, une erreur s'affiche dans la section concernée, avec le chemin exact du journal (`overlay.log` ou `alarm.log`) dans le dossier de logs du plugin. Après 3 échecs de suite, l'overlay n'est plus relancé : change un réglage pour réessayer.
 - L'affichage X utilisé est `:0` par défaut. Il peut être changé dans `~/homebrew/settings/Decky Timer/state.json` (clé `display`).
 
 ## Développement

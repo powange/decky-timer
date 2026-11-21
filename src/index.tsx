@@ -43,6 +43,7 @@ interface Timer {
   end_at: number | null;
   remaining: number | null;
   paused: boolean;
+  alarm_muted?: boolean;
 }
 
 interface Settings {
@@ -57,6 +58,7 @@ interface Settings {
   alarm_repeat: boolean;
   alarm_interval: number;
   alarm_volume: number;
+  alarm_max_minutes: number;
 }
 
 interface State {
@@ -68,6 +70,7 @@ interface State {
   overlay_error: string;
   controller_status: string;
   alarm_error: string;
+  log_dir: string;
 }
 
 const getState = callable<[], State>("get_state");
@@ -78,11 +81,15 @@ const resumeTimer = callable<[id: string], State>("resume_timer");
 const restartTimer = callable<[id: string], State>("restart_timer");
 const stopTimer = callable<[id: string], State>("stop_timer");
 const stopAll = callable<[], State>("stop_all");
-const savePreset = callable<[id: string, name: string, duration: number], State>("save_preset");
+const savePreset = callable<[id: string, name: string, duration: number], State & { saved_id: string }>("save_preset");
 const deletePreset = callable<[id: string], State>("delete_preset");
 const movePreset = callable<[id: string, delta: number], State>("move_preset");
 const saveSettings = callable<[settings: Partial<Settings>], State>("save_settings");
 const testAlarm = callable<[], State>("test_alarm");
+const muteAlarm = callable<[id: string], State>("mute_alarm");
+
+// Must match NAME_MAX in main.py.
+const NAME_MAX = 24;
 
 // The backend clock is the reference (the overlay uses it too).
 let clockOffset = 0;
@@ -188,6 +195,9 @@ function ActiveTimerModal({
         </div>
       </div>
       <Focusable style={modalButtons}>
+        {alarmRinging(t) && (
+          <DialogButton onClick={() => run(() => muteAlarm(t.id))}>Couper l'alarme</DialogButton>
+        )}
         {t.paused ? (
           <DialogButton onClick={() => run(() => resumeTimer(t.id))}>Reprendre</DialogButton>
         ) : (
@@ -199,6 +209,16 @@ function ActiveTimerModal({
       </Focusable>
     </ModalRoot>
   );
+}
+
+// Same rule as _alarm_tick in main.py: is this timer's alarm still active?
+function alarmRinging(t: Timer): boolean {
+  const settings = latestState?.settings;
+  if (!settings?.alarm_enabled || t.paused || t.alarm_muted) return false;
+  const overtime = -remainingOf(t);
+  if (overtime < 0) return false;
+  const max = (settings.alarm_max_minutes ?? 5) * 60;
+  return max === 0 || overtime <= max;
 }
 
 // Most urgent first: overtime (most overdue first), then running by time
@@ -278,7 +298,7 @@ async function openQuickControls() {
     return;
   }
   // Bring up the Steam overlay so the dialog is visible on top of the game.
-  Navigation.OpenQuickAccessMenu(999 as any); // QuickAccessTab.Decky
+  Navigation.OpenQuickAccessMenu();
   const onState = (s: State) => syncClock(s);
   setTimeout(() => {
     if (state.timers.length === 1) {
@@ -312,15 +332,25 @@ function TimerEditorModal({
     onState(syncClock(await fn()));
   };
 
-  const save = () => run(() => savePreset(preset?.id ?? "", label, duration));
-  const launch = () => run(() => startTimer(label, duration, preset?.id ?? ""));
+  // Returns the preset id, so a timer launched right after is linked to it.
+  const save = async () => {
+    const res = await savePreset(preset?.id ?? "", label, duration);
+    onState(syncClock(res));
+    return res.saved_id;
+  };
+  const launch = (presetId: string) => run(() => startTimer(label, duration, presetId));
 
   return (
     <ModalRoot onCancel={closeModal}>
       <div style={{ fontSize: 18, fontWeight: "bold", marginBottom: 8 }}>
         {preset ? "Modifier le timer" : "Nouveau timer"}
       </div>
-      <TextField label="Nom" value={name} onChange={(e) => setName(e.target.value)} />
+      <TextField
+        label="Nom"
+        description={`${name.length}/${NAME_MAX} caractères`}
+        value={name}
+        onChange={(e) => setName(e.target.value.slice(0, NAME_MAX))}
+      />
       <SliderField label="Heures" value={h} min={0} max={12} step={1} showValue onChange={setH} />
       <SliderField label="Minutes" value={m} min={0} max={59} step={1} showValue onChange={setM} />
       <SliderField label="Secondes" value={s} min={0} max={59} step={1} showValue onChange={setS} />
@@ -333,7 +363,7 @@ function TimerEditorModal({
             <DialogButton disabled={duration <= 0} onClick={async () => { await save(); closeModal?.(); }}>
               Enregistrer
             </DialogButton>
-            <DialogButton disabled={duration <= 0} onClick={async () => { await save(); await launch(); closeModal?.(); }}>
+            <DialogButton disabled={duration <= 0} onClick={async () => { await launch(await save()); closeModal?.(); }}>
               Enregistrer et lancer
             </DialogButton>
             <Focusable style={{ display: "flex", gap: 8 }}>
@@ -350,13 +380,13 @@ function TimerEditorModal({
           </>
         ) : (
           <>
-            <DialogButton disabled={duration <= 0} onClick={async () => { await save(); await launch(); closeModal?.(); }}>
+            <DialogButton disabled={duration <= 0} onClick={async () => { await launch(await save()); closeModal?.(); }}>
               Enregistrer et lancer
             </DialogButton>
             <DialogButton disabled={duration <= 0} onClick={async () => { await save(); closeModal?.(); }}>
               Enregistrer seulement
             </DialogButton>
-            <DialogButton disabled={duration <= 0} onClick={async () => { await launch(); closeModal?.(); }}>
+            <DialogButton disabled={duration <= 0} onClick={async () => { await launch(""); closeModal?.(); }}>
               Lancer sans enregistrer
             </DialogButton>
           </>
@@ -386,6 +416,18 @@ const INSTALL_TYPE_UPDATE = 2;
 
 let updateCheckedThisSession = false;
 
+// Compares "v1.2.3" / "1.2.3" numerically: >0 when a is newer than b.
+function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => v.replace(/^v/, "").split(/[.-]/).map((x) => parseInt(x, 10) || 0);
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length, 3); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
 function UpdateSection() {
   const [current, setCurrent] = useState<string>("");
   const [latest, setLatest] = useState<{ tag: string; url: string } | null>(null);
@@ -404,7 +446,7 @@ function UpdateSection() {
       const rel = await res.json();
       const asset = (rel.assets || []).find((a: any) => a.name === UPDATE_ASSET);
       if (!asset) throw new Error(`pas de ${UPDATE_ASSET} dans la dernière release`);
-      if (rel.tag_name === `v${version}`) {
+      if (compareVersions(rel.tag_name, version) <= 0) {
         setStatus(`À jour (${rel.tag_name})`);
       } else {
         setLatest({ tag: rel.tag_name, url: asset.browser_download_url });
@@ -481,6 +523,11 @@ const positionOptions = [
   { data: "top-right", label: "En haut à droite" },
   { data: "bottom-left", label: "En bas à gauche" },
   { data: "bottom-right", label: "En bas à droite" },
+];
+
+const alarmMaxOptions = [
+  ...[1, 2, 5, 10, 30].map((m) => ({ data: m, label: `Après ${m} min` })),
+  { data: 0, label: "Jamais" },
 ];
 
 const intervalOptions = [10, 20, 30, 60].map((s) => ({ data: s, label: `Toutes les ${s} s` }));
@@ -683,6 +730,15 @@ function Content() {
               </PanelSectionRow>
             )}
             <PanelSectionRow>
+              <Field label="Arrêt automatique" childrenContainerWidth="max">
+                <Dropdown
+                  rgOptions={alarmMaxOptions}
+                  selectedOption={settings.alarm_max_minutes ?? 5}
+                  onChange={(o) => updateSettings({ alarm_max_minutes: o.data })}
+                />
+              </Field>
+            </PanelSectionRow>
+            <PanelSectionRow>
               <ButtonItem layout="below" onClick={async () => apply(await testAlarm())}>
                 Tester l'alarme
               </ButtonItem>
@@ -691,7 +747,10 @@ function Content() {
         )}
         {state.alarm_error && (
           <PanelSectionRow>
-            <div style={{ fontSize: 11, color: "#ff8080" }}>{state.alarm_error}</div>
+            <div style={{ fontSize: 11, color: "#ff8080" }}>
+              {state.alarm_error}
+              <div style={{ color: "#999" }}>Détails : {state.log_dir}/alarm.log</div>
+            </div>
           </PanelSectionRow>
         )}
       </PanelSection>
@@ -718,7 +777,7 @@ function Content() {
           <PanelSectionRow>
             <div style={{ fontSize: 11, color: "#ff8080" }}>
               {state.overlay_error}
-              <div style={{ color: "#999" }}>Change un réglage pour réessayer. Détails : logs du plugin (overlay.log).</div>
+              <div style={{ color: "#999" }}>Change un réglage pour réessayer. Détails : {state.log_dir}/overlay.log</div>
             </div>
           </PanelSectionRow>
         )}

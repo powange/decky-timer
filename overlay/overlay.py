@@ -314,6 +314,7 @@ class Overlay:
 FONT_SANS = b"sans-serif"
 FONT_MONO = b"monospace"
 SIZES = {"small": 0.8, "medium": 1.0, "large": 1.35, "xlarge": 1.75}
+NAME_MAX = 24  # longer names are cut with an ellipsis (cards stay compact)
 
 
 # --------------------------------------------------------------------------- #
@@ -344,7 +345,10 @@ def build_rows(state, now):
         else:
             remaining = float(t.get("end_at") or now) - now
             status = "run" if remaining > 0 else "over"
-        rows.append((str(t.get("name") or "Timer"), format_seconds(remaining), status))
+        name = " ".join(str(t.get("name") or "Timer").split())
+        if len(name) > NAME_MAX:
+            name = name[:NAME_MAX - 1] + "…"
+        rows.append((name, format_seconds(remaining), status))
     return rows
 
 

@@ -21,12 +21,23 @@ DEFAULT_SETTINGS = {
     "opacity": 0.75,
     "notify": True,            # toast when a timer reaches zero
     "display": ":0",           # gamescope's Xwayland used by Steam
-    "shortcut": "l5_r5",
+    "shortcut": "l5_r5",       # controller combo opening the timer actions (or "off")
     "alarm_enabled": True,     # alarm sound when a timer reaches zero
     "alarm_repeat": True,      # repeat it while the timer is in overtime
     "alarm_interval": 30,      # seconds between repeats
-    "alarm_volume": 0.8,       # 0.0 - 1.0       # controller combo opening the timer actions (or "off")
+    "alarm_volume": 0.8,       # 0.0 - 1.0
+    "alarm_max_minutes": 5,    # stop repeating after this much overtime (0 = never)
 }
+
+NAME_MAX = 24               # characters kept in a timer name
+LOG_MAX_BYTES = 256 * 1024  # overlay.log is rotated past this size
+OVERLAY_MAX_FAILURES = 3    # consecutive crashes before giving up
+OVERLAY_HEALTHY_AFTER = 60  # seconds of uptime that reset the crash count
+
+
+def _clean_name(name):
+    name = " ".join(str(name or "").split())
+    return name[:NAME_MAX] or "Timer"
 
 # ---- Controller shortcut -------------------------------------------------- #
 # The Deck controller is read from its raw HID reports (hidraw), like
@@ -121,7 +132,9 @@ class Plugin:
         self.settings = dict(DEFAULT_SETTINGS)
         self.proc = None
         self.overlay_error = ""
-        self.overlay_failures = []
+        self.overlay_failures = 0
+        self.proc_started = 0.0
+        self.dying = []            # (proc, deadline) of overlays being stopped
         self.watch_task = None
         self.loop = None
         self.controller_status = "Initialisation…"
@@ -131,6 +144,7 @@ class Plugin:
         self.alarm_proc = None
         self.alarm_last = {}       # timer id -> time of the last alarm
         self.alarm_error = ""
+        self.alarm_log = os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "alarm.log")
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -151,10 +165,12 @@ class Plugin:
             self.watch_task.cancel()
         self.reader_stop.set()
         self._stop_overlay()
+        self._reap(force=True)
         decky.logger.info("Decky Timer unloaded")
 
     async def _uninstall(self):
         self._stop_overlay()
+        self._reap(force=True)
 
     # ------------------------------------------------------------------ #
     # Persistence
@@ -164,13 +180,54 @@ class Plugin:
         try:
             with open(self.state_path, "r") as f:
                 data = json.load(f)
-            self.presets = data.get("presets", [])
-            self.timers = data.get("timers", [])
+            self.presets = self._valid_presets(data.get("presets", []))
+            self.timers = self._valid_timers(data.get("timers", []))
             self.settings = {**DEFAULT_SETTINGS, **data.get("settings", {})}
         except FileNotFoundError:
             pass
         except Exception as e:
             decky.logger.error(f"Could not read state: {e}")
+
+    @staticmethod
+    def _valid_presets(presets):
+        out = []
+        for p in presets if isinstance(presets, list) else []:
+            try:
+                out.append({"id": str(p["id"]), "name": _clean_name(p.get("name")),
+                            "duration": max(1, int(p.get("duration", 60)))})
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+        return out
+
+    @staticmethod
+    def _valid_timers(timers):
+        """Drops or repairs inconsistent timers from an old or damaged state.json."""
+        out = []
+        now = _now()
+        for t in timers if isinstance(timers, list) else []:
+            try:
+                duration = max(1, int(t.get("duration", 60)))
+                fixed = {
+                    "id": str(t["id"]),
+                    "name": _clean_name(t.get("name")),
+                    "duration": duration,
+                    "preset_id": t.get("preset_id") or None,
+                    "end_at": None,
+                    "remaining": None,
+                    "paused": bool(t.get("paused")),
+                    "notified": bool(t.get("notified")),
+                    "alarm_muted": bool(t.get("alarm_muted")),
+                }
+                if fixed["paused"]:
+                    rem = t.get("remaining")
+                    fixed["remaining"] = float(rem) if rem is not None else float(duration)
+                else:
+                    end_at = t.get("end_at")
+                    fixed["end_at"] = float(end_at) if end_at is not None else now + duration
+                out.append(fixed)
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+        return out
 
     def _save(self):
         tmp = self.state_path + ".tmp"
@@ -188,6 +245,7 @@ class Plugin:
             "overlay_error": self.overlay_error,
             "controller_status": self.controller_status,
             "alarm_error": self.alarm_error,
+            "log_dir": decky.DECKY_PLUGIN_LOG_DIR,
         }
 
     def _changed(self):
@@ -224,6 +282,8 @@ class Plugin:
         # desktop user, who owns the gamescope X session.
         user_kwargs = self._as_desktop_user(env)
         try:
+            if os.path.exists(self.overlay_log) and os.path.getsize(self.overlay_log) > LOG_MAX_BYTES:
+                os.replace(self.overlay_log, self.overlay_log + ".1")
             log = open(self.overlay_log, "a")
             log.write(f"--- start {time.strftime('%Y-%m-%d %H:%M:%S')} DISPLAY={env['DISPLAY']}\n")
             log.flush()
@@ -232,6 +292,8 @@ class Plugin:
                 stdin=subprocess.PIPE, stdout=log, stderr=log, env=env,
                 cwd=os.path.dirname(self.overlay_script), **user_kwargs,
             )
+            # Non-blocking pipe: a stuck overlay must never block the backend.
+            os.set_blocking(self.proc.stdin.fileno(), False)
             self.proc_started = _now()
             log.close()
         except Exception as e:
@@ -280,9 +342,11 @@ class Plugin:
             cmd = [player, "-q", self.alarm_wav]
         env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
         try:
-            self.alarm_proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
-                                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                               **self._as_desktop_user(env))
+            # stderr goes to a file: a pipe nobody reads could block the player.
+            with open(self.alarm_log, "w") as err:
+                self.alarm_proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
+                                                   stdout=subprocess.DEVNULL, stderr=err,
+                                                   **self._as_desktop_user(env))
             self.alarm_error = ""
         except Exception as e:
             self.alarm_error = f"Lecture du son impossible : {e}"
@@ -292,7 +356,11 @@ class Plugin:
         p = self.alarm_proc
         if p is not None and p.poll() is not None:
             if p.returncode != 0:
-                err = (p.stderr.read() or b"").decode(errors="replace").strip().splitlines()
+                try:
+                    with open(self.alarm_log, errors="replace") as f:
+                        err = f.read().strip().splitlines()
+                except OSError:
+                    err = []
                 self.alarm_error = f"Le lecteur audio a échoué : {err[-1] if err else p.returncode}"
                 decky.logger.error(self.alarm_error)
             self.alarm_proc = None
@@ -302,10 +370,16 @@ class Plugin:
         if not self.settings.get("alarm_enabled", True):
             return
         interval = max(5, int(self.settings.get("alarm_interval", 30)))
+        max_overtime = max(0, int(self.settings.get("alarm_max_minutes", 5))) * 60
         due = False
         active = set()
         for t in self.timers:
             if t.get("paused") or not t.get("end_at") or t["end_at"] > now:
+                continue
+            if t.get("alarm_muted"):
+                continue
+            # Never ring for a timer forgotten for long (or expired while off).
+            if max_overtime and now - t["end_at"] > max_overtime:
                 continue
             active.add(t["id"])
             last = self.alarm_last.get(t["id"])
@@ -318,17 +392,31 @@ class Plugin:
             self._play_alarm()
 
     def _stop_overlay(self):
+        """Asks the overlay to quit (EOF) without waiting; _reap() finishes the job."""
         if self.proc is None:
             return
         try:
             self.proc.stdin.close()
-            self.proc.wait(timeout=1.5)
         except Exception:
-            try:
-                self.proc.kill()
-            except Exception:
-                pass
+            pass
+        self.dying.append((self.proc, _now() + 2))
         self.proc = None
+
+    def _reap(self, force=False):
+        """Collects stopped overlays, killing those still alive past their deadline."""
+        still = []
+        for proc, deadline in self.dying:
+            if proc.poll() is not None:
+                continue
+            if force or _now() >= deadline:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=0.2)
+                except Exception:
+                    pass
+                continue
+            still.append((proc, deadline))
+        self.dying = still
 
     def _sync_overlay(self):
         """Start/stop the overlay as needed and push it the current timers."""
@@ -338,22 +426,34 @@ class Plugin:
         if self.proc is not None and self.proc.poll() is not None:
             self._overlay_died()
         if self.proc is None:
-            # Give up after 3 crashes in a minute; settings changes retry.
-            recent = [t for t in self.overlay_failures if _now() - t < 60]
-            if len(recent) >= 3:
+            # Give up after repeated crashes, until a settings change or a
+            # plugin restart (no endless restart loop filling the log).
+            if self.overlay_failures >= OVERLAY_MAX_FAILURES:
                 return
             self._start_overlay()
         if self.proc is not None:
+            data = self._overlay_payload().encode()
             try:
-                self.proc.stdin.write(self._overlay_payload().encode())
-                self.proc.stdin.flush()
-            except (BrokenPipeError, OSError):
+                written = os.write(self.proc.stdin.fileno(), data)
+                if written != len(data):
+                    raise BlockingIOError("partial write")
+            except BlockingIOError:
+                # Pipe full: the overlay stopped reading. Replace it.
+                decky.logger.error("Overlay not responding, restarting it")
+                self._stop_overlay()
+                self.overlay_failures += 1
+            except (BrokenPipeError, OSError, ValueError):
                 self._overlay_died()
 
     def _overlay_died(self):
         code = self.proc.poll() if self.proc else None
+        if self.proc is not None:
+            self.dying.append((self.proc, _now() + 2))
         self.proc = None
-        self.overlay_failures.append(_now())
+        # A crash after a long healthy run (e.g. Steam restart) starts a new count.
+        if _now() - self.proc_started > OVERLAY_HEALTHY_AFTER:
+            self.overlay_failures = 0
+        self.overlay_failures += 1
         tail = ""
         try:
             with open(self.overlay_log, "r") as f:
@@ -362,6 +462,8 @@ class Plugin:
         except Exception:
             pass
         self.overlay_error = f"L'overlay s'est arrêté (code {code}). {tail}".strip()
+        if self.overlay_failures >= OVERLAY_MAX_FAILURES:
+            self.overlay_error += " Relances abandonnées après plusieurs échecs."
         decky.logger.error(self.overlay_error)
 
     async def _watch(self):
@@ -380,6 +482,7 @@ class Plugin:
                         for t in fired:
                             await decky.emit("timer_finished", {"id": t["id"], "name": t["name"]})
                 self._alarm_tick(now)
+                self._reap()
                 # Restart a crashed overlay.
                 if self._overlay_wanted() and (self.proc is None or self.proc.poll() is not None):
                     self._sync_overlay()
@@ -481,20 +584,21 @@ class Plugin:
         now = _now()
         self.timers.append({
             "id": uuid.uuid4().hex[:10],
-            "name": (name or "").strip() or "Timer",
+            "name": _clean_name(name),
             "duration": duration,
             "preset_id": preset_id or None,
             "end_at": now + duration,
             "remaining": None,
             "paused": False,
             "notified": False,
+            "alarm_muted": False,
         })
         return self._changed()
 
     async def pause_timer(self, timer_id: str):
         t = self._find_timer(timer_id)
         if t and not t["paused"]:
-            t["remaining"] = t["end_at"] - _now()
+            t["remaining"] = (t.get("end_at") or _now()) - _now()
             t["end_at"] = None
             t["paused"] = True
         return self._changed()
@@ -514,6 +618,13 @@ class Plugin:
             t["remaining"] = None
             t["paused"] = False
             t["notified"] = False
+            t["alarm_muted"] = False
+        return self._changed()
+
+    async def mute_alarm(self, timer_id: str):
+        t = self._find_timer(timer_id)
+        if t:
+            t["alarm_muted"] = True
         return self._changed()
 
     async def stop_timer(self, timer_id: str):
@@ -527,15 +638,18 @@ class Plugin:
     # Presets ---------------------------------------------------------- #
 
     async def save_preset(self, preset_id: str, name: str, duration: float):
-        name = (name or "").strip() or "Timer"
+        name = _clean_name(name)
         duration = max(1, int(duration))
         existing = next((p for p in self.presets if p["id"] == preset_id), None) if preset_id else None
         if existing:
             existing["name"] = name
             existing["duration"] = duration
+            saved_id = existing["id"]
         else:
-            self.presets.append({"id": uuid.uuid4().hex[:10], "name": name, "duration": duration})
-        return self._changed()
+            saved_id = uuid.uuid4().hex[:10]
+            self.presets.append({"id": saved_id, "name": name, "duration": duration})
+        # The frontend needs the id to launch the timer linked to this preset.
+        return {**self._changed(), "saved_id": saved_id}
 
     async def delete_preset(self, preset_id: str):
         self.presets = [p for p in self.presets if p["id"] != preset_id]
@@ -563,7 +677,7 @@ class Plugin:
             if key in settings:
                 self.settings[key] = settings[key]
         # A settings change is also a manual retry after overlay crashes.
-        self.overlay_failures = []
+        self.overlay_failures = 0
         self.overlay_error = ""
         if self.settings.get("display") != old_display:
             self._stop_overlay()
