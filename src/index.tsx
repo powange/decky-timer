@@ -50,17 +50,15 @@ interface Timer {
 interface Settings {
   overlay_enabled: boolean;
   position: string;
-  size: string;
-  opacity: number;
   overlay_last_minutes: number;
   notify: boolean;
-  display: string;
   shortcut: string;
   alarm_enabled: boolean;
   alarm_repeat: boolean;
   alarm_interval: number;
   alarm_volume: number;
   alarm_max_minutes: number;
+  overlay_install_prompted: boolean;
 }
 
 interface State {
@@ -68,12 +66,11 @@ interface State {
   presets: Preset[];
   timers: Timer[];
   settings: Settings;
-  overlay_running: boolean;
+  overlay_status: "connected" | "not_running" | "not_installed";
   overlay_error: string;
   controller_status: string;
   alarm_error: string;
   log_dir: string;
-  game_mode: boolean;
 }
 
 const getState = callable<[], State>("get_state");
@@ -93,6 +90,43 @@ const muteAlarm = callable<[id: string], State>("mute_alarm");
 const addTime = callable<[id: string, seconds: number], State>("add_time");
 const snoozeTimer = callable<[id: string, seconds: number], State>("snooze_timer");
 const previewOverlay = callable<[], State>("preview_overlay");
+const overlayInstallPrompted = callable<[], State>("overlay_install_prompted");
+
+// ---------------------------------------------------------------------------
+// Decky Overlay (shared in-game overlay, powange/decky-overlay)
+// ---------------------------------------------------------------------------
+
+const OVERLAY_REPO = "powange/decky-overlay";
+const OVERLAY_ASSET = "decky-overlay.zip";
+const OVERLAY_PLUGIN_NAME = "Decky Overlay"; // "name" in its plugin.json
+const OVERLAY_MANUAL_URL = `https://github.com/${OVERLAY_REPO}/releases/latest/download/${OVERLAY_ASSET}`;
+const INSTALL_TYPE_INSTALL = 0; // Decky's PluginInstallType.INSTALL
+
+// Decky has no plugin dependencies: Decky Timer asks Decky to install the
+// overlay plugin itself (Decky shows its usual confirmation). Returns an
+// error message, or "" when the install dialog was opened.
+async function installDeckyOverlay(): Promise<string> {
+  const backend = (window as any).DeckyBackend;
+  if (typeof backend?.call !== "function") {
+    return "Installation automatique indisponible avec cette version de Decky.";
+  }
+  try {
+    let version = "latest";
+    try {
+      const res = await fetchNoCors(`https://api.github.com/repos/${OVERLAY_REPO}/releases/latest`, {
+        headers: { Accept: "application/vnd.github+json" },
+      });
+      if (res.ok) version = String((await res.json()).tag_name ?? "latest").replace(/^v/, "");
+    } catch {
+      // keep "latest": the download URL below always points to the newest release
+    }
+    await backend.call("utilities/install_plugin", OVERLAY_MANUAL_URL, OVERLAY_PLUGIN_NAME, version, "",
+      INSTALL_TYPE_INSTALL);
+    return "";
+  } catch (e: any) {
+    return `Échec de l'installation : ${e?.message ?? e}`;
+  }
+}
 
 // Must match NAME_MAX in main.py.
 const NAME_MAX = 24;
@@ -615,12 +649,49 @@ const lastMinutesOptions = [
   ...[1, 5, 10, 30].map((m) => ({ data: m, label: `${m} dernière${m > 1 ? "s" : ""} min` })),
 ];
 
-const sizeOptions = [
-  { data: "small", label: "Petite" },
-  { data: "medium", label: "Moyenne" },
-  { data: "large", label: "Grande" },
-  { data: "xlarge", label: "Très grande" },
-];
+function OverlayStatus({ state, onState }: { state: State; onState: (s: State) => void }) {
+  const [message, setMessage] = useState("");
+  const status = state.overlay_status;
+  return (
+    <>
+      <PanelSectionRow>
+        <div style={{ fontSize: 12, lineHeight: 1.4 }}>
+          {status === "connected" && (
+            <span style={{ color: "#7c7" }}>Affiché via Decky Overlay (taille et opacité se règlent dans ce plugin).</span>
+          )}
+          {status === "not_running" && (
+            <span style={{ color: "#ffc84d" }}>Decky Overlay est installé mais pas encore actif. Il se connectera tout seul.</span>
+          )}
+          {status === "not_installed" && (
+            <span style={{ color: "#ff8080" }}>
+              L'affichage en jeu passe par le plugin Decky Overlay, partagé avec d'autres plugins. Il n'est pas installé.
+            </span>
+          )}
+          {state.overlay_error && <div style={{ color: "#ff8080" }}>{state.overlay_error}</div>}
+          {message && (
+            <div style={{ color: "#ff8080", wordBreak: "break-all" }}>
+              {message} Installe-le depuis Decky › Développeur › Installer depuis une URL :
+              <div style={{ fontFamily: "monospace", color: "#ddd" }}>{OVERLAY_MANUAL_URL}</div>
+            </div>
+          )}
+        </div>
+      </PanelSectionRow>
+      {status === "not_installed" && (
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={async () => {
+              setMessage(await installDeckyOverlay());
+              onState(syncClock(await overlayInstallPrompted()));
+            }}
+          >
+            Installer Decky Overlay
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+    </>
+  );
+}
 
 function Content() {
   const [state, setState] = useState<State | null>(null);
@@ -777,13 +848,7 @@ function Content() {
       </PanelSection>
 
       <PanelSection title="Overlay en jeu">
-        {!state.game_mode && (
-          <PanelSectionRow>
-            <div style={{ fontSize: 12, color: "#999" }}>
-              Hors du mode jeu : l'overlay ne s'affiche pas sur le bureau.
-            </div>
-          </PanelSectionRow>
-        )}
+        <OverlayStatus state={state} onState={apply} />
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={async () => apply(await previewOverlay())}>
             Aperçu de l'overlay (10 s)
@@ -806,15 +871,6 @@ function Content() {
           </Field>
         </PanelSectionRow>
         <PanelSectionRow>
-          <Field label="Taille" childrenContainerWidth="max">
-            <Dropdown
-              rgOptions={sizeOptions}
-              selectedOption={settings.size}
-              onChange={(o) => updateSettings({ size: o.data })}
-            />
-          </Field>
-        </PanelSectionRow>
-        <PanelSectionRow>
           <Field label="Afficher" childrenContainerWidth="max">
             <Dropdown
               rgOptions={lastMinutesOptions}
@@ -822,17 +878,6 @@ function Content() {
               onChange={(o) => updateSettings({ overlay_last_minutes: o.data })}
             />
           </Field>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <SliderField
-            label="Opacité du fond"
-            value={Math.round(settings.opacity * 100)}
-            min={20}
-            max={100}
-            step={5}
-            showValue
-            onChange={(v) => updateSettings({ opacity: v / 100 })}
-          />
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
@@ -935,14 +980,6 @@ function Content() {
             </div>
           </div>
         </PanelSectionRow>
-        {state.overlay_error && (
-          <PanelSectionRow>
-            <div style={{ fontSize: 11, color: "#ff8080" }}>
-              {state.overlay_error}
-              <div style={{ color: "#999" }}>Change un réglage pour réessayer. Détails : {state.log_dir}/overlay.log</div>
-            </div>
-          </PanelSectionRow>
-        )}
       </PanelSection>
 
       <UpdateSection />
@@ -963,8 +1000,20 @@ export default definePlugin(() => {
     });
   });
 
-  // Load settings now so the shortcut works before the menu is ever opened.
-  getState().then(syncClock).catch(() => {});
+  // Load settings now so the shortcut works before the menu is ever opened,
+  // and offer to install Decky Overlay once if it is missing.
+  getState()
+    .then(async (s) => {
+      syncClock(s);
+      if (s.overlay_status === "not_installed" && !s.settings.overlay_install_prompted) {
+        const error = await installDeckyOverlay();
+        syncClock(await overlayInstallPrompted());
+        if (error) {
+          toaster.toast({ title: "Decky Timer", body: `Decky Overlay non installé : ${error}` });
+        }
+      }
+    })
+    .catch(() => {});
   const shortcutListener = addEventListener("open_quick_controls", () => {
     openQuickControls();
   });

@@ -64,20 +64,20 @@ def test_damaged_state_is_repaired(plugin):
             "timers": [{"id": "a", "duration": 60, "paused": False}, {"id": "b", "duration": 30, "paused": True},
                        {"name": "no id"}, "junk"],
             "presets": [{"id": "p", "name": "P", "duration": 90}, {"bad": 1}],
-            "settings": {"opacity": "very", "position": "top-left"},
+            "settings": {"alarm_volume": "very", "position": "top-left"},
         }, f)
     plugin._load()
     assert [t["id"] for t in plugin.timers] == ["a", "b"]
     assert plugin.timers[0]["end_at"] and plugin.timers[1]["remaining"] == 30.0
     assert len(plugin.presets) == 1
     assert plugin.settings["position"] == "top-left"
-    assert plugin.settings["opacity"] == main.DEFAULT_SETTINGS["opacity"]
+    assert plugin.settings["alarm_volume"] == main.DEFAULT_SETTINGS["alarm_volume"]
 
 
 def test_settings_whitelist():
-    v = main._valid_settings({"opacity": 0.5, "display": ":0; rm -rf /", "size": "huge",
+    v = main._valid_settings({"alarm_volume": 0.5, "display": ":0; rm -rf /", "position": "huge",
                               "notify": "yes", "unknown": 1, "shortcut": "l4_r4"})
-    assert v == {"opacity": 0.5, "shortcut": "l4_r4"}
+    assert v == {"alarm_volume": 0.5, "shortcut": "l4_r4"}
 
 
 def test_api_bounds(plugin):
@@ -85,41 +85,3 @@ def test_api_bounds(plugin):
     assert t["duration"] == main.MAX_DURATION and t["preset_id"] is None
     with pytest.raises(ValueError):
         run(plugin.start_timer("x", "60"))
-
-
-def test_overlay_gives_up_and_rotates_log(plugin, monkeypatch):
-    monkeypatch.setattr(main, "_gamescope_running", lambda: True)
-    plugin.settings.update(overlay_enabled=True, display=":99")  # no X server there
-    with open(plugin.overlay_log, "w") as f:
-        f.write("x" * (main.LOG_MAX_BYTES + 1))
-    plugin.timers = [{"id": "t", "name": "T", "duration": 60, "end_at": time.time() + 60, "paused": False}]
-    for _ in range(40):
-        plugin._sync_overlay()
-        plugin._reap()
-        time.sleep(0.25)
-        if plugin.overlay_failures >= main.OVERLAY_MAX_FAILURES:
-            break
-    assert plugin.overlay_failures == main.OVERLAY_MAX_FAILURES and plugin.proc is None
-    assert os.path.exists(plugin.overlay_log + ".1")
-
-
-def test_stuck_overlay_never_blocks(plugin, tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "_gamescope_running", lambda: True)
-    stuck = tmp_path / "stuck.py"
-    stuck.write_text("import time\ntime.sleep(60)\n")
-    plugin.overlay_script = str(stuck)
-    plugin.settings["overlay_enabled"] = True
-    plugin.timers = [{"id": str(i), "name": "N" * 24, "duration": 60, "end_at": time.time() + 60,
-                      "paused": False} for i in range(40)]
-    t0 = time.time()
-    for _ in range(200):
-        plugin._sync_overlay()
-    assert time.time() - t0 < 2 and plugin.overlay_failures >= 1
-
-
-def test_no_overlay_outside_game_mode(plugin, monkeypatch):
-    monkeypatch.setattr(main, "_gamescope_running", lambda: False)
-    plugin.settings["overlay_enabled"] = True
-    plugin.timers = [{"id": "t", "name": "T", "duration": 60, "end_at": time.time() + 60, "paused": False}]
-    plugin.game_mode_checked = 0
-    assert plugin._overlay_wanted() is False

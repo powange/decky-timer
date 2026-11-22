@@ -19,36 +19,29 @@ DEFAULT_SETTINGS = {
     "overlay_enabled": True,
     "position": "top-center",  # top-left | top-center | top-right | bottom-left | bottom-right
                                # (top-right sits under the Quick Access menu)
-    "size": "medium",          # small | medium | large | xlarge
-    "opacity": 0.75,
     "overlay_last_minutes": 0, # only show a timer in its last N minutes (0 = always)
     "notify": True,            # toast when a timer reaches zero
-    "display": ":0",           # gamescope's Xwayland used by Steam
     "shortcut": "l5_r5",       # controller combo opening the timer actions (or "off")
     "alarm_enabled": True,     # alarm sound when a timer reaches zero
     "alarm_repeat": True,      # repeat it while the timer is in overtime
     "alarm_interval": 30,      # seconds between repeats
     "alarm_volume": 0.8,       # 0.0 - 1.0
     "alarm_max_minutes": 5,    # stop repeating after this much overtime (0 = never)
+    "overlay_install_prompted": False,  # Decky Overlay install already offered once
 }
 
 NAME_MAX = 24               # characters kept in a timer name
-LOG_MAX_BYTES = 256 * 1024  # overlay.log is rotated past this size
-OVERLAY_MAX_FAILURES = 3    # consecutive crashes before giving up
-OVERLAY_HEALTHY_AFTER = 60  # seconds of uptime that reset the crash count
 PREVIEW_SECONDS = 10        # how long the overlay preview stays on screen
 
+# ---- Decky Overlay --------------------------------------------------------- #
+# gamescope shows a single external overlay window: the in-game display is
+# delegated to the Decky Overlay plugin (powange/decky-overlay), shared by
+# every plugin. See its README for the protocol.
+OVERLAY_SOCKET = "/tmp/decky-overlay/overlay.sock"
+OVERLAY_PLUGIN_NAME = "Decky Overlay"
+OVERLAY_RETRY = 3           # seconds between connection attempts
+OVERLAY_MAX_ITEMS = 12      # per block, protocol limit
 
-def _gamescope_running():
-    """True when the Game Mode session (gamescope) is up: no overlay on the desktop."""
-    for comm in glob.glob("/proc/[0-9]*/comm"):
-        try:
-            with open(comm) as f:
-                if f.read().startswith("gamescope"):
-                    return True
-        except OSError:
-            continue
-    return False
 
 
 MAX_DURATION = 24 * 3600    # longest timer (seconds)
@@ -83,26 +76,18 @@ def _number(lo, hi, cast=float):
     return check
 
 
-def _display(v):
-    if isinstance(v, str) and re.fullmatch(r":\d{1,2}", v):
-        return v
-    raise ValueError("not an X display like :0")
-
-
 SETTINGS_SCHEMA = {
     "overlay_enabled": _bool,
     "position": _choice("top-left", "top-center", "top-right", "bottom-left", "bottom-right"),
-    "size": _choice("small", "medium", "large", "xlarge"),
-    "opacity": _number(0.0, 1.0),
     "overlay_last_minutes": _number(0, 600, int),
     "notify": _bool,
-    "display": _display,
     "shortcut": lambda v: _choice("off", *SHORTCUTS)(v),  # SHORTCUTS is defined below
     "alarm_enabled": _bool,
     "alarm_repeat": _bool,
     "alarm_interval": _number(5, 3600, int),
     "alarm_volume": _number(0.0, 1.0),
     "alarm_max_minutes": _number(0, 600, int),
+    "overlay_install_prompted": _bool,
 }
 
 
@@ -213,22 +198,103 @@ def _now() -> float:
     return time.time()
 
 
+class OverlayClient:
+    """Connection to the Decky Overlay plugin's socket (one per Decky Timer)."""
+
+    def __init__(self, on_connect):
+        self.on_connect = on_connect
+        self.reader = None
+        self.writer = None
+        self.read_task = None
+        self.last_attempt = 0.0
+        self.error = ""
+
+    @property
+    def connected(self):
+        return self.writer is not None
+
+    async def ensure(self):
+        """Connects if needed (called from the watch loop, rate limited)."""
+        if self.writer is not None or _now() - self.last_attempt < OVERLAY_RETRY:
+            return
+        self.last_attempt = _now()
+        if not os.path.exists(OVERLAY_SOCKET):
+            return
+        try:
+            self.reader, self.writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(OVERLAY_SOCKET), 2)
+        except Exception as e:
+            self.reader = self.writer = None
+            self.error = f"Connexion impossible : {e}"
+            return
+        self.error = ""
+        self.send({"op": "hello", "client": "decky-timer", "name": "Decky Timer", "protocol": 1})
+        self.read_task = asyncio.get_event_loop().create_task(self._read())
+        self.on_connect()
+
+    async def _read(self):
+        try:
+            while self.reader is not None:
+                line = await self.reader.readline()
+                if not line:
+                    break
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if msg.get("op") == "error":
+                    self.error = f"Decky Overlay : {msg.get('error')}"
+                    decky.logger.warning(self.error)
+        except (ConnectionError, OSError, asyncio.CancelledError):
+            pass
+        finally:
+            self._drop()
+
+    def send(self, msg):
+        if self.writer is None:
+            return
+        try:
+            self.writer.write((json.dumps(msg) + "\n").encode())
+        except Exception:
+            self._drop()
+
+    def _drop(self):
+        if self.writer is not None:
+            try:
+                self.writer.close()
+            except Exception:
+                pass
+        self.reader = self.writer = None
+
+    def close(self):
+        if self.read_task:
+            self.read_task.cancel()
+        self._drop()
+
+
+def _overlay_installed():
+    """True if a plugin named "Decky Overlay" is in Decky's plugins folder."""
+    plugins = os.path.join(getattr(decky, "DECKY_HOME", "/home/deck/homebrew"), "plugins")
+    for manifest in glob.glob(os.path.join(plugins, "*", "plugin.json")):
+        try:
+            with open(manifest) as f:
+                if json.load(f).get("name") == OVERLAY_PLUGIN_NAME:
+                    return True
+        except (OSError, ValueError, AttributeError):
+            continue
+    return False
+
+
 class Plugin:
     def __init__(self):
         self.state_path = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "state.json")
-        self.overlay_script = os.path.join(decky.DECKY_PLUGIN_DIR, "overlay", "overlay.py")
-        self.overlay_log = os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "overlay.log")
         self.presets = []
         self.timers = []
         self.settings = dict(DEFAULT_SETTINGS)
-        self.proc = None
-        self.overlay_error = ""
-        self.overlay_failures = 0
-        self.proc_started = 0.0
-        self.dying = []            # (proc, deadline) of overlays being stopped
+        self.overlay = OverlayClient(on_connect=self._sync_overlay)
+        self.overlay_installed = False
+        self.overlay_checked = 0.0
         self.preview_until = 0.0
-        self.game_mode = True
-        self.game_mode_checked = 0.0
         self.watch_task = None
         self.loop = None
         self.controller_status = "Initialisation…"
@@ -249,7 +315,6 @@ class Plugin:
         os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
         os.makedirs(decky.DECKY_PLUGIN_LOG_DIR, exist_ok=True)
         self._load()
-        self._sync_overlay()
         self.loop = asyncio.get_event_loop()
         self.watch_task = self.loop.create_task(self._watch())
         threading.Thread(target=self._controller_supervisor, daemon=True).start()
@@ -259,13 +324,11 @@ class Plugin:
         if self.watch_task:
             self.watch_task.cancel()
         self.reader_stop.set()
-        self._stop_overlay()
-        self._reap(force=True)
+        self.overlay.close()
         decky.logger.info("Decky Timer unloaded")
 
     async def _uninstall(self):
-        self._stop_overlay()
-        self._reap(force=True)
+        self.overlay.close()
 
     # ------------------------------------------------------------------ #
     # Persistence
@@ -338,12 +401,11 @@ class Plugin:
             "presets": self.presets,
             "timers": self.timers,
             "settings": self.settings,
-            "overlay_running": self.proc is not None and self.proc.poll() is None,
-            "overlay_error": self.overlay_error,
+            "overlay_status": self._overlay_status(),
+            "overlay_error": self.overlay.error,
             "controller_status": self.controller_status,
             "alarm_error": self.alarm_error,
             "log_dir": decky.DECKY_PLUGIN_LOG_DIR,
-            "game_mode": self.game_mode,
         }
 
     def _changed(self):
@@ -358,64 +420,44 @@ class Plugin:
     # Overlay process
     # ------------------------------------------------------------------ #
 
-    def _in_game_mode(self):
-        # Cached: scanning /proc every half second would be wasteful.
-        if _now() - self.game_mode_checked > 5:
-            self.game_mode = _gamescope_running()
-            self.game_mode_checked = _now()
-        return self.game_mode
-
     def _preview_active(self):
         return _now() < self.preview_until
 
-    def _overlay_wanted(self):
-        if not self._in_game_mode():
-            return False
-        if self._preview_active():
-            return True
-        return bool(self.settings.get("overlay_enabled")) and len(self.timers) > 0
+    # ------------------------------------------------------------------ #
+    # Decky Overlay
+    # ------------------------------------------------------------------ #
 
-    def _overlay_payload(self):
-        timers = [
-            {k: t.get(k) for k in ("id", "name", "end_at", "remaining", "paused")}
-            for t in self.timers
-        ]
-        if self._preview_active():
-            timers = [{"id": "preview", "name": "Aperçu", "end_at": self.preview_until + 290,
-                       "remaining": None, "paused": False}] + timers
-        settings = {k: self.settings.get(k) for k in ("position", "size", "opacity")}
-        settings["last_minutes"] = self.settings.get("overlay_last_minutes", 0)
-        return json.dumps({"timers": timers, "settings": settings}) + "\n"
+    def _overlay_status(self):
+        if self.overlay.connected:
+            return "connected"
+        if _now() - self.overlay_checked > 10:
+            self.overlay_installed = _overlay_installed()
+            self.overlay_checked = _now()
+        return "not_running" if self.overlay_installed else "not_installed"
 
-    def _start_overlay(self):
-        python = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else shutil.which("python3")
-        if not python:
-            self.overlay_error = "python3 introuvable sur le système"
-            return
-        env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
-        env["DISPLAY"] = self.settings.get("display") or ":0"
-        # The backend runs as root (needed for hidraw); the overlay runs as the
-        # desktop user, who owns the gamescope X session.
-        user_kwargs = self._as_desktop_user(env)
-        try:
-            if os.path.exists(self.overlay_log) and os.path.getsize(self.overlay_log) > LOG_MAX_BYTES:
-                os.replace(self.overlay_log, self.overlay_log + ".1")
-            log = open(self.overlay_log, "a")
-            log.write(f"--- start {time.strftime('%Y-%m-%d %H:%M:%S')} DISPLAY={env['DISPLAY']}\n")
-            log.flush()
-            self.proc = subprocess.Popen(
-                [python, "-u", self.overlay_script],
-                stdin=subprocess.PIPE, stdout=log, stderr=log, env=env,
-                cwd=os.path.dirname(self.overlay_script), **user_kwargs,
-            )
-            # Non-blocking pipe: a stuck overlay must never block the backend.
-            os.set_blocking(self.proc.stdin.fileno(), False)
-            self.proc_started = _now()
-            log.close()
-        except Exception as e:
-            self.proc = None
-            self.overlay_error = f"Lancement impossible : {e}"
-            decky.logger.error(self.overlay_error)
+    def _overlay_message(self):
+        items = []
+        if self._preview_active():
+            items.append({"label": "Aperçu Decky Timer", "countdown": {"end_at": self.preview_until + 290}})
+        if self.settings.get("overlay_enabled", True):
+            limit = int(self.settings.get("overlay_last_minutes", 0)) * 60
+            for t in self.timers:
+                if t.get("paused"):
+                    cd = {"paused": True, "remaining": float(t.get("remaining") or 0)}
+                else:
+                    cd = {"end_at": float(t.get("end_at") or _now())}
+                item = {"label": t["name"], "countdown": cd}
+                if limit:
+                    item["show_under"] = limit
+                items.append(item)
+        if not items:
+            return {"op": "clear", "id": "timers"}
+        return {"op": "set", "id": "timers", "zone": self.settings.get("position", "top-center"),
+                "order": 0, "items": items[:OVERLAY_MAX_ITEMS]}
+
+    def _sync_overlay(self):
+        """Sends the current timers to Decky Overlay (no-op when not connected)."""
+        self.overlay.send(self._overlay_message())
 
     def _as_desktop_user(self, env):
         """Popen kwargs (and env changes) to run a child as the desktop user."""
@@ -507,81 +549,6 @@ class Plugin:
         if due:
             self._play_alarm()
 
-    def _stop_overlay(self):
-        """Asks the overlay to quit (EOF) without waiting; _reap() finishes the job."""
-        if self.proc is None:
-            return
-        try:
-            self.proc.stdin.close()
-        except Exception:
-            pass
-        self.dying.append((self.proc, _now() + 2))
-        self.proc = None
-
-    def _reap(self, force=False):
-        """Collects stopped overlays, killing those still alive past their deadline."""
-        still = []
-        for proc, deadline in self.dying:
-            if proc.poll() is not None:
-                continue
-            if force or _now() >= deadline:
-                try:
-                    proc.kill()
-                    proc.wait(timeout=0.2)
-                except Exception:
-                    pass
-                continue
-            still.append((proc, deadline))
-        self.dying = still
-
-    def _sync_overlay(self):
-        """Start/stop the overlay as needed and push it the current timers."""
-        if not self._overlay_wanted():
-            self._stop_overlay()
-            return
-        if self.proc is not None and self.proc.poll() is not None:
-            self._overlay_died()
-        if self.proc is None:
-            # Give up after repeated crashes, until a settings change or a
-            # plugin restart (no endless restart loop filling the log).
-            if self.overlay_failures >= OVERLAY_MAX_FAILURES:
-                return
-            self._start_overlay()
-        if self.proc is not None:
-            data = self._overlay_payload().encode()
-            try:
-                written = os.write(self.proc.stdin.fileno(), data)
-                if written != len(data):
-                    raise BlockingIOError("partial write")
-            except BlockingIOError:
-                # Pipe full: the overlay stopped reading. Replace it.
-                decky.logger.error("Overlay not responding, restarting it")
-                self._stop_overlay()
-                self.overlay_failures += 1
-            except (BrokenPipeError, OSError, ValueError):
-                self._overlay_died()
-
-    def _overlay_died(self):
-        code = self.proc.poll() if self.proc else None
-        if self.proc is not None:
-            self.dying.append((self.proc, _now() + 2))
-        self.proc = None
-        # A crash after a long healthy run (e.g. Steam restart) starts a new count.
-        if _now() - self.proc_started > OVERLAY_HEALTHY_AFTER:
-            self.overlay_failures = 0
-        self.overlay_failures += 1
-        tail = ""
-        try:
-            with open(self.overlay_log, "r") as f:
-                lines = [l.strip() for l in f.readlines() if l.strip()]
-            tail = lines[-1] if lines else ""
-        except Exception:
-            pass
-        self.overlay_error = f"L'overlay s'est arrêté (code {code}). {tail}".strip()
-        if self.overlay_failures >= OVERLAY_MAX_FAILURES:
-            self.overlay_error += " Relances abandonnées après plusieurs échecs."
-        decky.logger.error(self.overlay_error)
-
     async def _watch(self):
         while True:
             try:
@@ -598,14 +565,11 @@ class Plugin:
                         for t in fired:
                             await decky.emit("timer_finished", {"id": t["id"], "name": t["name"]})
                 self._alarm_tick(now)
-                self._reap()
                 # End of the overlay preview: hide it (or show the real timers).
                 if self.preview_until and now >= self.preview_until:
                     self.preview_until = 0.0
                     self._sync_overlay()
-                # Restart a crashed overlay.
-                if self._overlay_wanted() and (self.proc is None or self.proc.poll() is not None):
-                    self._sync_overlay()
+                await self.overlay.ensure()  # (re)connects to Decky Overlay
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -790,10 +754,14 @@ class Plugin:
 
     async def preview_overlay(self):
         self.preview_until = _now() + PREVIEW_SECONDS
-        self.overlay_failures = 0
-        self.overlay_error = ""
-        self.game_mode_checked = 0.0
         self._sync_overlay()
+        return self._state()
+
+    async def overlay_install_prompted(self):
+        """Remembers that the Decky Overlay install was offered (once only)."""
+        self.settings["overlay_install_prompted"] = True
+        self._save()
+        self.overlay_checked = 0.0
         return self._state()
 
     async def mute_alarm(self, timer_id: str):
@@ -848,11 +816,5 @@ class Plugin:
         return self._state()
 
     async def save_settings(self, settings: dict):
-        old_display = self.settings.get("display")
         self.settings.update(_valid_settings(settings))
-        # A settings change is also a manual retry after overlay crashes.
-        self.overlay_failures = 0
-        self.overlay_error = ""
-        if self.settings.get("display") != old_display:
-            self._stop_overlay()
         return self._changed()

@@ -34,8 +34,7 @@ def plugin(tmp_path, monkeypatch):
     monkeypatch.setattr(decky, "DECKY_PLUGIN_LOG_DIR", str(tmp_path / "logs"), raising=False)
     monkeypatch.setattr(decky, "DECKY_PLUGIN_DIR", ROOT, raising=False)
     decky.events.clear()
+    monkeypatch.setattr(main, "OVERLAY_SOCKET", str(tmp_path / "overlay.sock"))
     p = main.Plugin()
-    p.settings["overlay_enabled"] = False  # no X server needed unless a test asks
     yield p
-    p._stop_overlay()
-    p._reap(force=True)
+    p.overlay.close()

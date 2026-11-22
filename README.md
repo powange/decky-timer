@@ -12,8 +12,8 @@ Des timers nommés pour le Steam Deck, affichés **en overlay par-dessus le jeu*
 - **Temps dépassé** : à zéro, le timer continue en négatif (en rouge) et une notification s'affiche.
 - **Alarme sonore** : un bip d'alarme dédié retentit à la fin, puis se répète (toutes les 10 à 60 s) tant que le timer est en négatif et n'est ni en pause ni arrêté. Volume réglable et bouton de test. Le son est généré par le plugin et joué via PipeWire (`pw-play`).
 - **Contrôle** : touche un timer en cours pour le mettre en pause, le reprendre, ajouter +1 / +5 min, le relancer, l'arrêter, couper son alarme ou le reporter (« Rappel dans 5 min »).
-- **Raccourci manette** : maintiens une combinaison en jeu (L5 + R5 par défaut, ou L4 + R4, Select + Start) pour ouvrir directement le menu pause / relancer / arrêter. S'il y a plusieurs timers, une liste triée par urgence s'affiche. Comme decky-macro, la manette est lue directement (hidraw), donc ça marche en jeu, et le plugin tourne en root pour y accéder (l'overlay, lui, tourne sous l'utilisateur normal). Toucher l'overlay lui-même n'est pas possible : gamescope envoie le tactile au jeu.
-- **Overlay réglable** : position (en haut au centre par défaut, pour ne pas passer sous le menu d'accès rapide), taille, opacité du fond, on/off, et un bouton d'aperçu de 10 s. L'overlay ne s'affiche qu'en mode jeu, jamais sur le bureau.
+- **Raccourci manette** : maintiens une combinaison en jeu (L5 + R5 par défaut, ou L4 + R4, Select + Start) pour ouvrir directement le menu pause / relancer / arrêter. S'il y a plusieurs timers, une liste triée par urgence s'affiche. Comme decky-macro, la manette est lue directement (hidraw), donc ça marche en jeu, et le plugin tourne en root pour y accéder. Toucher l'overlay lui-même n'est pas possible : gamescope envoie le tactile au jeu.
+- **Overlay en jeu** via [Decky Overlay](https://github.com/powange/decky-overlay) : position (en haut au centre par défaut, pour ne pas passer sous le menu d'accès rapide), affichage seulement les N dernières minutes, on/off, aperçu de 10 s. Taille et opacité se règlent dans Decky Overlay.
 - **Saisie rapide** : durées toutes prêtes (1, 5, 10, 15, 30 min), confirmation avant de lancer un second exemplaire d'un timer déjà en cours, temps restant affiché sur son bouton.
 - **Mise à jour intégrée** : le plugin vérifie la dernière release GitHub et l'installe via l'installeur de Decky. Plus besoin de retaper l'URL.
 
@@ -28,11 +28,9 @@ Des timers nommés pour le Steam Deck, affichés **en overlay par-dessus le jeu*
 
 ## Comment marche l'overlay
 
-Decky n'affiche normalement rien pendant une partie, en dehors du menu d'accès rapide. Le backend lance donc un petit processus (`overlay/overlay.py`, avec le `python3` du système) qui ouvre une fenêtre X11 transparente sur l'Xwayland de gamescope (`DISPLAY=:0`). Cette fenêtre porte l'atome `GAMESCOPE_EXTERNAL_OVERLAY`, comme mangoapp (l'overlay de performances) : gamescope l'affiche alors au-dessus du jeu. La fenêtre n'a pas de zone de saisie, donc elle n'intercepte jamais les touches ni l'écran tactile.
+gamescope n'affiche qu'une seule fenêtre d'overlay externe à la fois : deux plugins qui ouvrent chacun la leur se gênent. L'affichage en jeu est donc confié au plugin [Decky Overlay](https://github.com/powange/decky-overlay), partagé par plusieurs plugins. Decky Timer lui envoie ses timers par un socket local, sous forme de comptes à rebours, et c'est Decky Overlay qui les dessine et les fait défiler chaque seconde.
 
-Le dessin se fait avec cairo via `ctypes`. `libX11`, `libXext` et `libcairo` sont déjà présents sur SteamOS, donc il n'y a rien à compiler. Le processus ne tourne que lorsqu'au moins un timer est actif.
-
-Côté ressources, l'overlay ne se réveille qu'au changement de seconde affichée (jamais si tout est en pause), ne repeint que la zone des cartes, et sa fenêtre est retirée de l'écran quand rien n'est affiché. L'option « Afficher : N dernières minutes » évite à gamescope de composer l'overlay pendant les longs timers. La manette n'est lue que si le raccourci est activé, et seulement sur son interface manette.
+Decky ne gère pas les dépendances entre plugins. Si Decky Overlay manque, Decky Timer propose de l'installer une fois, au premier lancement : Decky affiche sa confirmation habituelle. Un bouton « Installer Decky Overlay » reste disponible dans le panneau. Sans lui, les timers, le raccourci, l'alarme et les notifications fonctionnent quand même, juste sans affichage en jeu.
 
 ## Fiabilité et sécurité
 
@@ -43,7 +41,7 @@ Côté ressources, l'overlay ne se réveille qu'au changement de seconde affich�
 
 ## Dépannage
 
-- Si l'overlay n'apparaît pas ou si l'alarme ne sonne pas, une erreur s'affiche dans la section concernée, avec le chemin exact du journal (`overlay.log` ou `alarm.log`) dans le dossier de logs du plugin. Après 3 échecs de suite, l'overlay n'est plus relancé : change un réglage pour réessayer.
+- Si l'alarme ne sonne pas, une erreur s'affiche dans la section Alarme, avec le chemin exact de `alarm.log`. Pour l'overlay, le panneau indique si Decky Overlay est connecté, installé mais inactif, ou absent. Ses propres erreurs s'affichent dans le panneau de Decky Overlay.
 - L'affichage X utilisé est `:0` par défaut. Il peut être changé dans `~/homebrew/settings/Decky Timer/state.json` (clé `display`).
 
 ## Développement
