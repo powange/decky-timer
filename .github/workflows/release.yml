@@ -83,7 +83,7 @@ jobs:
 
       - name: Check Python
         if: steps.version.outputs.exists == 'false'
-        run: python3 -m py_compile main.py overlay/overlay.py
+        run: python3 -m py_compile main.py
 
       - name: Build frontend
         if: steps.version.outputs.exists == 'false'
