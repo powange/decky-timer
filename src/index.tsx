@@ -222,13 +222,14 @@ function ActiveTimerModal({
   const [t, setT] = useState<Timer>(timer);
   useTick();
 
-  // Any action closes the dialog and the Quick Access panel.
-  const run = async (fn: () => Promise<State>) => {
+  // Actions close the dialog and the Quick Access panel, except time
+  // adjustments (stay = true), so ±1 / ±5 min can be pressed several times.
+  const run = async (fn: () => Promise<State>, stay = false) => {
     const s = syncClock(await fn());
     onState(s);
     const updated = s.timers.find((x) => x.id === t.id);
     if (updated) setT(updated);
-    closeEverything(closeModal);
+    if (!stay || !updated) closeEverything(closeModal);
   };
   const dismiss = () => (fromShortcut ? closeEverything(closeModal) : closeModal?.());
 
@@ -256,7 +257,7 @@ function ActiveTimerModal({
             <DialogButton
               key={sec}
               style={{ flex: 1, minWidth: 0, padding: "0 4px" }}
-              onClick={() => run(() => addTime(t.id, sec))}
+              onClick={() => run(() => addTime(t.id, sec), true)}
             >
               {sec > 0 ? "+" : "−"}
               {Math.abs(sec) / 60} min
