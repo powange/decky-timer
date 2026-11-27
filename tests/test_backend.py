@@ -85,3 +85,21 @@ def test_api_bounds(plugin):
     assert t["duration"] == main.MAX_DURATION and t["preset_id"] is None
     with pytest.raises(ValueError):
         run(plugin.start_timer("x", "60"))
+
+
+def test_remove_time(plugin):
+    tid = run(plugin.start_timer("A", 600))["timers"][0]["id"]
+    t = plugin._find_timer(tid)
+    run(plugin.add_time(tid, -300))
+    assert 295 < t["end_at"] - time.time() <= 300 and not t["notified"]
+    run(plugin.add_time(tid, -300))          # past zero: ends now, rings as usual
+    assert t["end_at"] <= time.time() + 0.5
+    run(plugin.pause_timer(tid))
+    rem = t["remaining"]
+    run(plugin.add_time(tid, -60))
+    assert abs(t["remaining"] - (rem - 60)) < 0.01
+    t["notified"] = True
+    run(plugin.add_time(tid, -60))          # removing never re-arms a finished timer
+    assert t["notified"] is True
+    with pytest.raises(ValueError):
+        run(plugin.add_time(tid, "60"))

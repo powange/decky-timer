@@ -252,12 +252,16 @@ function ActiveTimerModal({
           <DialogButton onClick={() => run(() => snoozeTimer(t.id, 300))}>Rappel dans 5 min</DialogButton>
         )}
         <Focusable style={{ display: "flex", gap: 8 }}>
-          <DialogButton style={{ flex: 1, minWidth: 0 }} onClick={() => run(() => addTime(t.id, 60))}>
-            +1 min
-          </DialogButton>
-          <DialogButton style={{ flex: 1, minWidth: 0 }} onClick={() => run(() => addTime(t.id, 300))}>
-            +5 min
-          </DialogButton>
+          {[-300, -60, 60, 300].map((sec) => (
+            <DialogButton
+              key={sec}
+              style={{ flex: 1, minWidth: 0, padding: "0 4px" }}
+              onClick={() => run(() => addTime(t.id, sec))}
+            >
+              {sec > 0 ? "+" : "−"}
+              {Math.abs(sec) / 60} min
+            </DialogButton>
+          ))}
         </Focusable>
         {t.paused ? (
           <DialogButton onClick={() => run(() => resumeTimer(t.id))}>Reprendre</DialogButton>

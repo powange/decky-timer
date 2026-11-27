@@ -726,17 +726,25 @@ class Plugin:
         return self._changed()
 
     async def add_time(self, timer_id: str, seconds: float):
-        """+1 min / +5 min. Back above zero, the timer can ring again."""
+        """+1 / +5 min, or -1 / -5 min with a negative value.
+
+        Adding time back above zero lets the timer ring again; removing time
+        past zero makes it end now (notification and alarm as usual).
+        """
         t = self._find_timer(timer_id)
         if t:
-            seconds = _duration(seconds, 1, MAX_ADD)
+            if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+                raise ValueError("seconds is not a number")
+            seconds = int(max(-MAX_ADD, min(MAX_ADD, seconds)))
+            if seconds == 0:
+                return self._state()
             if t["paused"]:
                 t["remaining"] = float(t["remaining"] or 0) + seconds
                 remaining = t["remaining"]
             else:
                 t["end_at"] = float(t["end_at"] or _now()) + seconds
                 remaining = t["end_at"] - _now()
-            if remaining > 0:
+            if seconds > 0 and remaining > 0:
                 t["notified"] = False
                 t["alarm_muted"] = False
         return self._changed()
